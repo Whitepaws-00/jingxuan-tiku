@@ -124,7 +124,6 @@ table.stats td{padding:8px 4px;border-bottom:1px solid #f2f4f9}
 .badge.no{background:var(--red)}
 .badge.skip{background:#c3cad8}
 .diag{border-left:4px solid var(--orange);background:#fff9ee;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:13.5px}
-.wechat-warn{margin:10px 14px 0;padding:10px 12px;border-left:4px solid var(--orange);background:#fff9ee;border-radius:8px;font-size:13px;line-height:1.7}
 .diag.blue{border-color:var(--blue);background:var(--blue2)}
 .diag.red{border-color:var(--red);background:#fdf0f0}
 details.fold{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fff;margin-bottom:10px}
@@ -1027,7 +1026,6 @@ function viewQuizRun(){
   const answeredN = s.qids.filter(id => s.answers[id]).length;
   const remain = s.timeLimit ? s.timeLimit - (Date.now() - s.startedAt) / 1000 : null;
   const a = s.answers[question.id];
-  const wechat = /MicroMessenger|QQ\//i.test(navigator.userAgent);
   const marked = a && a.marked;
   const keys = Object.keys(question.options || {}).sort();
   if(!keys.length){ LETTERS.slice(0,4).forEach(k => question.options[k] = question.options[k] || ''); }
@@ -1068,7 +1066,6 @@ function viewQuizRun(){
       <span>${q.pos + 1}/${cur.total} · 已答${answeredN}</span>
       <button class="btn btn-primary btn-sm" data-act="quiz-finish">交卷</button></div>
       <div class="progress"><i style="width:${Math.round(answeredN / cur.total * 100)}%"></i></div></div>
-    ${wechat ? '<div class="wechat-warn">⚠️ 检测到微信/QQ 内置浏览器：这类环境刷新或退出后<b>可能清空本地记录</b>。进度虽已即时保存，仍建议点右上角「···」→「在浏览器打开」，用系统浏览器做题更稳。</div>' : ''}
     <div class="q-body">${body}</div>
     <div class="quiz-foot">
       <button class="btn btn-sm" data-act="sheet-open">🗂 答题卡</button>
