@@ -464,6 +464,104 @@ function buildReportMD(s, qs, st){
   L.push(`*由「京选刷题」导出于 ${fmtTime(Date.now())}*`);
   return L.join('\n');
 }
+// ---------- 报告导出 ----------
+function reportToMarkdown(s, qs, st){
+  const L = [];
+  L.push(`# 京选刷题 · 成绩报告\n`);
+  L.push(`> **试卷**：${s.paperName}  `);
+  L.push(`> **模式**：${s.mode === 'special' ? '专项练习（' + (s.types || []).join('、') + '）' : '整卷'}  `);
+  L.push(`> **作答时间**：${fmtTime(s.startedAt)} ~ ${fmtTime(s.finishedAt)}  `);
+  L.push(`> **导出时间**：${fmtTime(Date.now())}\n`);
+  L.push(`## 一、总览\n`);
+  L.push(`| 指标 | 数值 |`);
+  L.push(`| --- | --- |`);
+  L.push(`| 得分率 | ${st.totalQ ? Math.round(st.scoreRate * 100) + '%' : '--'} |`);
+  L.push(`| 答对 / 计分题 | ${st.correct} / ${st.totalQ} |`);
+  L.push(`| 总用时 | ${fmtSec(st.totalTime)} |`);
+  L.push(`| 平均每题 | ${fmtSec(st.avgTime)} |`);
+  L.push(`| 已作答 | ${st.answered} / ${st.perQ.length} |\n`);
+  L.push(`## 二、题型统计\n`);
+  L.push(`| 题型 | 答对/计分 | 得分率 | 平均用时 | 题量 |`);
+  L.push(`| --- | --- | --- | --- | --- |`);
+  st.types.forEach(t => {
+    L.push(`| ${t.type} | ${t.correct}/${t.scorable} | ${Math.round(t.rate * 100)}% | ${fmtSec(t.avgTime)} | ${t.total} |`);
+  });
+  L.push('');
+  L.push(`## 三、诊断建议\n`);
+  const lowAcc = st.types.filter(t => t.scorable > 0 && t.rate < 0.6);
+  const slow = st.types.filter(t => t.avgTime > st.avgTime * 1.2 && t.avgTime > 0);
+  const fastOk = st.types.filter(t => t.scorable > 0 && t.rate >= 0.8 && t.avgTime <= st.avgTime);
+  if(lowAcc.length) L.push(`- 🎯 **需提高准确率**：${lowAcc.map(t => `${t.type}（${Math.round(t.rate * 100)}%）`).join('、')}——建议专项回炉`);
+  if(slow.length) L.push(`- 🐌 **需提高做题速度**：${slow.map(t => `${t.type} ${fmtSec(t.avgTime)}/题（全卷均值 ${fmtSec(st.avgTime)}）`).join('、')}`);
+  if(fastOk.length) L.push(`- ✅ **状态良好**：${fastOk.map(t => t.type).join('、')}——保持手感即可`);
+  if(!lowAcc.length && !slow.length && !fastOk.length) L.push(`- 本次没有作答记录`);
+  L.push('');
+  L.push(`## 四、逐题明细\n`);
+  L.push(`> 🚩 = 已标记；「慢」= 用时超过全卷均值的 150%\n`);
+  L.push(`| # | 题型 | 我的答案 | 正确答案 | 结果 | 用时 | 标记 |`);
+  L.push(`| --- | --- | --- | --- | --- | --- | --- |`);
+  st.perQ.forEach(r => {
+    const res = r.skipped ? '跳过' : (r.correct ? '✓ 正确' : '✗ 错误');
+    const mine = r.skipped ? '—' : r.choice;
+    const ans = r.answer || '未设';
+    const slowTag = (r.time > st.avgTime * 1.5 && !r.skipped) ? '（慢）' : '';
+    L.push(`| ${r.num} | ${r.type} | ${mine} | ${ans} | ${res} | ${r.skipped ? '—' : fmtSec(r.time) + slowTag} | ${r.marked ? '🚩' : ''} |`);
+  });
+  L.push('');
+  const wrongList = st.perQ.filter(r => !r.skipped && !r.correct && r.answer);
+  if(wrongList.length){
+    L.push(`## 五、错题回顾\n`);
+    wrongList.forEach(r => {
+      const qq = qs.find(q => q.id === r.qid);
+      L.push(`### 第 ${r.num} 题 · ${r.type}\n`);
+      if(qq && qq.stem) L.push(`${qq.stem}\n`);
+      if(qq && qq.options){
+        Object.keys(qq.options).sort().forEach(k => { if(qq.options[k]) L.push(`- ${k}. ${qq.options[k]}`); });
+        if(Object.keys(qq.options).length) L.push('');
+      }
+      L.push(`- 我的答案：**${r.choice || '未答'}**`);
+      L.push(`- 正确答案：**${r.answer}**\n`);
+    });
+  }
+  L.push(`---`);
+  L.push(`*本报告由「京选刷题」自动生成 · ${fmtTime(Date.now())}*`);
+  return L.join('\n');
+}
+function exportReportMd(sid){
+  const s = sessions.find(x => x.id === sid);
+  if(!s){ toast('报告不存在'); return; }
+  const p = papers.find(x => x.id === s.paperId);
+  const qs = p ? s.qids.map(id => p.questions.find(q => q.id === id)).filter(Boolean) : [];
+  if(!qs.length){ toast('试卷已被删除，无法导出'); return; }
+  const st = buildStats(s, qs);
+  const md = reportToMarkdown(s, qs, st);
+  const safe = String(s.paperName || '试卷').replace(/[\\/:*?"<>|]/g, '_');
+  const day = new Date(s.finishedAt || Date.now()).toISOString().slice(0, 10);
+  downloadText(md, `京选刷题报告_${safe}_${day}.md`, 'text/markdown;charset=utf-8');
+}
+function exportReportJson(sid){
+  const s = sessions.find(x => x.id === sid);
+  if(!s){ toast('报告不存在'); return; }
+  const p = papers.find(x => x.id === s.paperId);
+  const qs = p ? s.qids.map(id => p.questions.find(q => q.id === id)).filter(Boolean) : [];
+  const st = qs.length ? buildStats(s, qs) : null;
+  const payload = { app: '京选刷题', kind: 'report', version: 3, exportedAt: Date.now(), paperName: s.paperName, session: s, questions: qs, stats: st };
+  const safe = String(s.paperName || '试卷').replace(/[\\/:*?"<>|]/g, '_');
+  const day = new Date(s.finishedAt || Date.now()).toISOString().slice(0, 10);
+  downloadText(JSON.stringify(payload, null, 2), `京选刷题报告_${safe}_${day}.json`, 'application/json');
+}
+function downloadText(text, filename, mime){
+  try{
+    const blob = new Blob([text], { type: mime || 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+    toast('已导出：' + filename);
+  }catch(e){ toast('导出失败：' + e.message); }
+}
+
 //CORE>>>
 
 // ---------- PDF 解析 ----------
@@ -1053,9 +1151,11 @@ function viewReportDetail(){
   html += `</div>`;
   const wrongIds = st.perQ.filter(r => !r.skipped && !r.correct && r.answer).map(r => r.qid);
   if(wrongIds.length) html += `<button class="btn btn-green btn-block" data-act="redo-wrong-from-report" data-ids="${wrongIds.join(',')}">⭐ 立即重做本次错题（${wrongIds.length} 题）</button><div style="height:10px"></div>`;
-  html += `<button class="btn btn-block" data-act="export-report-md">📄 导出报告为 Markdown（.md）</button><div style="height:20px"></div>`;
+  html += `<button class="btn btn-primary btn-block" data-act="export-report-md" data-sid="${s.id}">📄 导出报告为 Markdown（.md）</button>
+    <button class="btn btn-block" data-act="export-report-json" data-sid="${s.id}">🧾 导出原始数据（.json）</button><div style="height:20px"></div>`;
   return html;
 }
+
 
 // ---------- 错题本 ----------
 function viewWrong(){
@@ -1154,6 +1254,10 @@ function viewMine(){
     保持「1. 题干」换行「A. 选项」结构，末尾附答案（如"参考答案：1-5 BADCB"或"1.B 2.D"）。行内多选项（A.xx B.xx 全角空格分隔）、选项跨行都能识别。个别解析错误的题在第二步校对编辑器里改一下即可。</div></details>
     <details class="fold"><summary>每题用时怎么算的？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     单题模式：切到某题开始计时，点下选项立即停表记为该题用时，随后自动跳下一题（可关闭）。跳过的题不计时；回看已答题修改答案不重复计时。点底部「答题卡」可打开网格总览跳题。</div></details>
+    <details class="fold"><summary>报告能导出吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
+    能。打开「报告」里任意一条记录，底部有 <b>📄 导出报告为 Markdown（.md）</b>，一键下载含总览、题型统计、诊断建议、逐题明细、错题回顾的 Markdown 文件，可直接传电脑/进笔记软件/交给 AI 分析；旁边还有「导出原始数据(.json)」给进阶用途。文件默认下载到浏览器下载目录。</div></details>
+    <details class="fold"><summary>做题做到一半刷新/离开会丢记录吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
+    <b>不会。</b>每勾选一题即写入本地存储；切换题目、切到后台、锁屏、刷新、关闭页面都会兜底保存。重新进入该试卷时会自动回到上次离开的题号（没有则跳到第一道未答题）。若该试卷已有进行中的练习，点「开始」会先问你是续做还是重开，避免误开新卷看不到旧答案。</div></details>
     <details class="fold"><summary>报告怎么帮我定位弱项？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     题型得分率低于 60% → 标「需提高准确率」；题型平均用时超过全卷均值 20% → 标「需提高速度」；单题用时超均值 50% → 明细标「慢」。双差题型优先专项练习（刷题页可选按题型专项）。</div></details>
     <details class="fold"><summary>判断推理能细分统计吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
@@ -1253,6 +1357,8 @@ document.addEventListener('click', e => {
     case 'sheet-jump': jumpToQ(el.dataset.qid); break;
     case 'report-open': state.reportOpenId = el.dataset.sid; render(); break;
     case 'report-back': state.reportOpenId = null; render(); break;
+    case 'export-report-md': exportReportMd(el.dataset.sid || state.reportOpenId); break;
+    case 'export-report-json': exportReportJson(el.dataset.sid || state.reportOpenId); break;
     case 'redo-wrong-from-report': { const ids = el.dataset.ids.split(','); const s = sessions.find(x => x.id === state.reportOpenId); const p = papers.find(x => x.id === s.paperId); const list = ids.map(id => { const qq = p.questions.find(q => q.id === id); const a = s.answers[id]; return { id: uid('w'), paperId: s.paperId, paperName: s.paperName, qid: id, q: { stem: qq.stem || '', options: Object.assign({}, qq.options), answer: qq.answer, type: qq.type || '未分类' }, myChoice: a ? a.choice : '', addedAt: Date.now(), resolved: false, redone: 0 }; }); startWrongRedo(list); break; }
     case 'wrong-filter': state.wrongFilter = el.dataset.v; render(); break;
     case 'wrong-del': if(confirm('从错题本移除？')){ wrongs = wrongs.filter(w => w.id !== el.dataset.wid); saveWrongs(); render(); } break;
