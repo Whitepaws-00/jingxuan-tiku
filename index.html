@@ -1017,8 +1017,20 @@ function curInfo(){
 function pick(key){
   const s = currentSession(), q = state.quiz;
   const cur = curInfo(); if(!cur) return;
+  const qid = cur.question.id;
+  const old = s.answers[qid];
+  if(old && old.choice === key){ render(); return; }   // 点的是当前已选项，无变化
+  // 已答过再改选：只更新选项与对错，保留原用时和标记，不跳题
+  if(old){
+    s.answers[qid] = Object.assign({}, old, { choice: key, correct: key === cur.question.answer });
+    saveSessions();
+    toast(`已改选：${old.choice || '未答'} → ${key}`);
+    render();
+    return;
+  }
+  // 首次作答：记录用时；默认自动跳下一题
   const t = Math.max(1, Math.round((Date.now() - q.shownAt) / 1000));
-  s.answers[cur.question.id] = { choice: key, correct: key === cur.question.answer, time: t };
+  s.answers[qid] = { choice: key, correct: key === cur.question.answer, time: t };
   saveSessions();
   if(settings.autoNext) nextQ(); else render();
 }
@@ -1331,7 +1343,7 @@ function viewMine(){
     <details class="fold"><summary>文本怎么粘识别率最高？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     保持「1. 题干」换行「A. 选项」结构，末尾附答案（如"参考答案：1-5 BADCB"或"1.B 2.D"）。行内多选项（A.xx B.xx 全角空格分隔）、选项跨行都能识别。个别解析错误的题在第二步校对编辑器里改一下即可。</div></details>
     <details class="fold"><summary>每题用时怎么算的？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
-    单题模式：切到某题开始计时，点下选项立即停表记为该题用时，随后自动跳下一题（可关闭）。跳过的题不计时；回看已答题修改答案不重复计时。点底部「答题卡」可打开网格总览跳题。</div></details>
+    单题模式：切到某题开始计时，点下选项立即停表记为该题用时，随后自动跳下一题（可关闭）。跳过的题不计时；<b>回看已答题可反复改选</b>（改选不重复计时、不自动跳题，保留第一次的用时）；点底部「答题卡」可打开网格总览跳题。<b>最终成绩以交卷时的最后一次选择为准。</b></div></details>
     <details class="fold"><summary>报告能导出吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     能。打开「报告」里任意一条记录，底部有 <b>📄 导出报告为 Markdown（.md）</b>，一键下载含总览、题型统计、诊断建议、逐题明细、错题回顾的 Markdown 文件，可直接传电脑/进笔记软件/交给 AI 分析；旁边还有「导出原始数据(.json)」给进阶用途。文件默认下载到浏览器下载目录。</div></details>
     <details class="fold"><summary>答题中途能保存退出吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
@@ -1344,7 +1356,7 @@ function viewMine(){
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v3.8 · 粉笔式刷题 + 答题卡 · 支持云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v3.9 · 粉笔式刷题 + 答题卡 · 支持云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
@@ -1497,7 +1509,7 @@ document.addEventListener('click', e => {
     case 'quiz-begin': beginQuiz(el.dataset.pid); break;
     case 'quiz-resume': enterQuiz(el.dataset.sid); break;
     case 'quiz-abandon': { if(confirm('放弃后本次作答将删除（不生成报告），确定？')){ sessions = sessions.filter(x => x.id !== el.dataset.sid); saveSessions(); render(); } break; }
-    case 'pick': { const s = currentSession(); const cur = curInfo(); if(cur && !s.answers[cur.question.id]) pick(el.dataset.key); break; }
+    case 'pick': { const cur = curInfo(); if(cur) pick(el.dataset.key); break; }
     case 'quiz-next': nextQ(); break;
     case 'quiz-prev': prevQ(); break;
     case 'quiz-mark': toggleMark(); break;
