@@ -150,7 +150,7 @@ details.fold summary{cursor:pointer;font-weight:600;font-size:14px}
 <script>
 'use strict';
 /* ============================================================
-   京选刷题 v4.4 · 粉笔式刷题 + 答题卡 双模式
+   京选刷题 v4.5 · 粉笔式刷题 + 答题卡 双模式
    - 完整录入（题干+选项+答案，粘贴文本/PDF 解析）→ 粉笔式单题作答
    - 快速建卡（仅题型+答案）→ 纯字母涂卡（自动降级）
    - 每题计时 · 题型得分率 · 双维度诊断 · 错题本 · 本地离线
@@ -1514,7 +1514,7 @@ function viewMine(){
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.4 · 支持坚果云/GitHub/Gitee 云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.5 · 支持坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
@@ -1542,12 +1542,22 @@ function syncReady(){
   return { ok: miss.length === 0, miss };
 }
 let syncing = false;
+let syncLockTimer = null;
+// 加锁：同时启动看门狗，防止某次请求被永久挂起导致后续操作全部失效
+function syncLock(){
+  syncing = true;
+  clearTimeout(syncLockTimer);
+  syncLockTimer = setTimeout(() => {
+    if(syncing){ syncing = false; toast('上次同步耗时过长已自动解除锁定，请重试'); }
+  }, 60000);
+}
+function syncUnlock(){ syncing = false; clearTimeout(syncLockTimer); syncLockTimer = null; }
 // 读取云端文件；不存在返回 {exists:false}
 async function syncGetRemote(){
   const cfg = buildSyncCfg();
   const g = syncGetConfig(sync.platform, cfg);
   let res;
-  try{ res = await fetch(g.url, { method: 'GET', headers: g.headers }); }
+  try{ res = await fetchT(g.url, { method: 'GET', headers: g.headers }, 20000); }
   catch(e){ throw new Error('网络异常，无法连接云平台（离线、代理未开或被浏览器拦截）'); }
   if(res.status === 404) return { exists: false };
   if(!res.ok) throw new Error(fmtSyncError(res.status, sync.platform));
@@ -1571,12 +1581,24 @@ async function syncGetRemote(){
   }
   return { exists: true, sha, data };
 }
+// 带超时的 fetch：避免请求被挂起时永远等待（浏览器会静默挂起 CORS 被拒的请求）
+// 超时后抛中文错误；原请求用 AbortController 中止
+async function fetchT(url, opts, ms){
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms || 20000);
+  try{
+    return await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
+  }catch(e){
+    if(e && (e.name === 'AbortError' || /abort/i.test(String(e.message)))) throw new Error('请求超时，未收到响应（可能是代理未放行该操作，请检查 Worker 脚本是否为最新版）');
+    throw e;
+  }finally{ clearTimeout(timer); }
+}
 // 坚果云：逐级确保父目录存在（MKCOL）。已存在返回 405，视为成功，忽略。
 async function nutstoreEnsureDirs(cfg){
   const dirs = nutstoreParentPaths(cfg);
   for(const url of dirs){
     let res;
-    try{ res = await fetch(url, { method: 'MKCOL', headers: nutstoreHeaders(cfg) }); }
+    try{ res = await fetchT(url, { method: 'MKCOL', headers: nutstoreHeaders(cfg) }, 15000); }
     catch(e){ throw new Error('网络异常，无法连接（离线、Worker 代理未开或被浏览器拦截）'); }
     // 201=新建成功；405=已存在；409=更上层不存在（按顺序建，理论不会）；403=路径非法
     if(res.ok || res.status === 405 || res.status === 409) continue;
@@ -1590,7 +1612,7 @@ async function syncUpload(silent){
   if(syncing){ if(!silent) toast('同步进行中，请稍候'); return; }
   const rd = syncReady();
   if(!rd.ok){ if(!silent) toast('请先填写：' + rd.miss.join('、')); return; }
-  syncing = true;
+  syncLock();
   if(!silent) toast('正在上传…');
   try{
     const cfg = buildSyncCfg();
@@ -1601,7 +1623,7 @@ async function syncUpload(silent){
       const text = JSON.stringify(buildSyncPayload(papers, sessions, wrongs, settings), null, 1);
       const url = nutstoreUrl(cfg, true);
       let res;
-      try{ res = await fetch(url, { method: 'PUT', headers: nutstoreHeaders(cfg), body: text }); }
+      try{ res = await fetchT(url, { method: 'PUT', headers: nutstoreHeaders(cfg), body: text }, 30000); }
       catch(e){ throw new Error('网络异常，无法连接（离线、Worker 代理未开或被浏览器拦截）'); }
       if(!res.ok) throw new Error(fmtSyncError(res.status, 'nutstore'));
       sync.lastSyncAt = Date.now();
@@ -1616,7 +1638,7 @@ async function syncUpload(silent){
     const method = isCreate ? ep.methodCreate : ep.methodUpdate;
     const body = syncBuildWriteBody(sync.platform, cfg, b64, remote.sha, isCreate);
     let res;
-    try{ res = await fetch(ep.url, { method, headers: syncHeaders(sync.platform, sync.token), body: JSON.stringify(body) }); }
+    try{ res = await fetchT(ep.url, { method, headers: syncHeaders(sync.platform, sync.token), body: JSON.stringify(body) }, 30000); }
     catch(e){ throw new Error('网络异常，无法连接云平台（离线或被浏览器拦截）'); }
     if(!res.ok) throw new Error(fmtSyncError(res.status, sync.platform));
     sync.lastSyncAt = Date.now();
@@ -1628,14 +1650,14 @@ async function syncUpload(silent){
     if(silent) console.warn('[sync] 自动上传失败：', e.message);
     else toast('上传失败：' + e.message);
     return false;
-  }finally{ syncing = false; }
+  }finally{ syncUnlock(); }
 }
 // 下载：拉云端 → 覆盖本地
 async function syncDownload(interactive){
   if(syncing){ toast('同步进行中，请稍候'); return; }
   const rd = syncReady();
   if(!rd.ok){ toast('请先填写：' + rd.miss.join('、')); return; }
-  syncing = true;
+  syncLock();
   try{
     toast('正在下载…');
     const remote = await syncGetRemote();
@@ -1650,20 +1672,20 @@ async function syncDownload(interactive){
     render();
     toast('✅ 已从云端同步到本机');
   }catch(e){ toast('下载失败：' + e.message); }
-  finally{ syncing = false; }
+  finally{ syncUnlock(); }
 }
 // 测试连接：只读探测，不改动任何数据
 async function syncTest(){
   if(syncing){ toast('同步进行中，请稍候'); return; }
   const rd = syncReady();
   if(!rd.ok){ toast('请先填写：' + rd.miss.join('、')); return; }
-  syncing = true;
+  syncLock();
   toast('正在测试连接…');
   try{
     const cfg = buildSyncCfg();
     const g = syncGetConfig(sync.platform, cfg);
     let res;
-    try{ res = await fetch(g.url, { method: 'GET', headers: g.headers }); }
+    try{ res = await fetchT(g.url, { method: 'GET', headers: g.headers }, 20000); }
     catch(e){ throw new Error('网络异常，无法连接（离线、Worker 代理未开或被浏览器拦截，也可能是代理未正确转发）'); }
     if(res.status === 200){
       const text = await res.text();
@@ -1692,7 +1714,7 @@ async function syncTest(){
       throw new Error(fmtSyncError(res.status, sync.platform));
     }
   }catch(e){ toast('❌ 测试失败：' + e.message); }
-  finally{ syncing = false; }
+  finally{ syncUnlock(); }
 }
 // 自动同步（交卷时调用，静默失败）
 function syncAutoPush(){
