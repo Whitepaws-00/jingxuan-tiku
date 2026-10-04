@@ -150,7 +150,7 @@ details.fold summary{cursor:pointer;font-weight:600;font-size:14px}
 <script>
 'use strict';
 /* ============================================================
-   京选刷题 v4.2 · 粉笔式刷题 + 答题卡 双模式
+   京选刷题 v4.3 · 粉笔式刷题 + 答题卡 双模式
    - 完整录入（题干+选项+答案，粘贴文本/PDF 解析）→ 粉笔式单题作答
    - 快速建卡（仅题型+答案）→ 纯字母涂卡（自动降级）
    - 每题计时 · 题型得分率 · 双维度诊断 · 错题本 · 本地离线
@@ -1421,10 +1421,17 @@ function viewMine(){
     <b>为什么需要 Worker？</b>坚果云 WebDAV 不允许网页直接跨域访问，需借一个免费小代理转发（Cloudflare Worker）。<br><br>
     <b>第一步 · 生成坚果云应用密码</b><br>
     登录 <b>jianguoyun.com</b> → 右上头像 →「账户信息」→ 左侧「安全选项」→ 找到「第三方应用管理 / 添加应用密码」→ 生成一个 → <b>复制那串密码</b>（不是你的登录密码）。<br><br>
-    <b>第二步 · 部署 Cloudflare Worker 代理</b><br>
-    ① 注册 <b>dash.cloudflare.com</b>（免费，不用信用卡）；<br>
-    ② 左侧「Workers & Pages」→「Create」→「Create Worker」→ 起个名字 → 部署；<br>
-    ③ 点「Edit code」，把下面这段全部替换进去后点「Deploy」：<br>
+    <b>第二步 · 部署 Cloudflare Worker 代理（详细步骤）</b><br>
+    <div style="padding-left:12px;border-left:3px solid #dbe3f5;margin:6px 0 6px 2px">
+    <b>2.1 注册账号</b>：打开 <code>dash.cloudflare.com</code>（或 <code>dash.cloudflare.com/sign-up</code>）→ 填邮箱 + 密码 → 注册（<b>免费，不需要信用卡</b>）→ 去邮箱点验证链接。<br><br>
+    <b>2.2 进入 Workers 页面</b>（Cloudflare 改版后入口有变化，三选一）：<br>
+    &nbsp;&nbsp;• <b>最简单</b>：直接点这个链接 → <code>dash.cloudflare.com/?to=/:account/workers-and-pages</code><br>
+    &nbsp;&nbsp;• <b>找菜单</b>：左侧栏找 <b>Compute（计算）</b> → 展开后点 <b>Workers &amp; Pages</b><br>
+    &nbsp;&nbsp;• <b>用搜索</b>：顶部搜索框输入 <code>Workers</code> → 点结果里的 Workers &amp; Pages<br>
+    &nbsp;&nbsp;<span style="color:#8a94a6">※ 如果左侧只看到「Workers」而没有「Pages」，没关系，照样能用。</span><br><br>
+    <b>2.3 新建 Worker</b>：在 Workers &amp; Pages 页面右上角点 <b>Create application</b>（蓝色按钮）→ 弹窗里选 <b>Create Worker</b> → 起个名字（如 <code>nutstore-proxy</code>，必须小写字母/数字/横杠）→ 点 <b>Deploy</b>。<br>
+    &nbsp;&nbsp;<span style="color:#8a94a6">※ 此时会先部署一个 Hello World，页面显示「Your Worker has been deployed」，这是正常的，下一步再改代码。</span><br><br>
+    <b>2.4 替换代码</b>：在部署成功页面点右上角 <b>Edit code</b>（或左边栏 <b>&lt;/&gt; Edit code</b>）→ 进入编辑器 → 左侧文件列表点 <code>worker.js</code>（新版可能叫 <code>index.js</code>）→ <b>全选删除</b>（Ctrl+A 再 Delete）→ 把下面这段完整粘贴进去：<br>
     <div style="background:#f4f6fb;border-radius:8px;padding:10px;margin:8px 0;font-family:monospace;font-size:11.5px;white-space:pre-wrap;overflow-x:auto">export default {
   async fetch(request) {
     const cors = {
@@ -1448,13 +1455,31 @@ function viewMine(){
     return out;
   }
 }</div>
-    ④ 部署后复制它给的地址（形如 <code>https://xxx.yyy.workers.dev</code>）。<br><br>
+    <b>2.5 再次部署</b>：粘贴完点右上角 <b>Deploy</b>（或 <b>Save and Deploy</b>）→ 等几秒出现「Deployed」提示。<br><br>
+    <b>2.6 拿到代理地址</b>：回到 Worker 详情页 → 页面上会显示形如 <code>https://nutstore-proxy.你的用户名.workers.dev</code> 的地址（也可能在 <b>Settings → Domains &amp; Routes</b> 里）→ <b>完整复制它</b>（以 <code>https://</code> 开头，<b>不要</b>带末尾斜杠、不要带 <code>/dav</code>）。<br>
+    &nbsp;&nbsp;<span style="color:#8a94a6">※ 首次访问可能报 523 错误，等 1 分钟再刷新即可。</span><br><br>
+    <b>2.7 自测代理</b>（可选但推荐）：把复制到的地址粘贴到浏览器地址栏，后面加上 <code>/jxst3_tiku/sync.json</code> 回车 —— 若返回 <code>401 Unauthorized</code>，<b>说明代理已正常工作</b>（401 是坚果云在拒绝"没带密码的访问"，正是我们想要的）；若报 404/522 等，说明地址或代理有问题。
+    </div><br>
     <b>第三步 · 回到本页填写</b><br>
-    平台选「坚果云」→ 填登录邮箱、应用密码、Worker 地址 → 云端路径保持 <code>jxst3_tiku/sync.json</code> → 点「🔍 测试连接」确认无误 → 点「⬆ 上传到云端」。<br>
-    <b>换设备</b>：另一台设备填同样的邮箱/应用密码/Worker 地址，点「⬇ 从云端下载」即可。</div></details>
+    平台选「坚果云」→ 依次填入：<b>坚果云账号</b>（登录邮箱）、<b>应用密码</b>（第一步生成的那串）、<b>Worker 代理</b>（2.6 复制到的地址）、<b>云端路径</b>（保持默认 <code>jxst3_tiku/sync.json</code> 即可）→ 点「🔍 测试连接」，出现「连接成功」即配置无误 → 点「⬆ 上传到云端」把本机数据存上去。<br>
+    <b>换设备</b>：另一台设备填<b>同样三项</b>（邮箱 / 应用密码 / Worker 地址），点「⬇ 从云端下载」即可恢复全部数据。</div></details>
+    <details class="fold"><summary>🔧 坚果云同步失败了？对照排查</summary><div class="muted" style="padding-top:8px;line-height:1.8">
+    <b>「请先填写：Worker 代理地址」</b> → 2.6 那一步的地址没填或填错。<br>
+    <b>「网络异常，无法连接」</b> → ① 代理地址拼写错误（必须 <code>https://</code> 开头）；② Worker 没部署成功，回 2.5 确认显示 Deployed；③ 公司/校园网拦截了 workers.dev，换个网络或热点试试。<br>
+    <b>「401 / 应用密码错误」</b> → 填成<b>登录密码</b>了。必须用第一步在「安全选项」里生成的<b>应用密码</b>（一串随机字符）。<br>
+    <b>「403 拒绝访问」</b> → 坚果云账号未开通 WebDAV，或该应用密码被删除了，重新生成一个。<br>
+    <b>「连接成功但云端文件不是有效备份」</b> → 说明路径下已有别的文件。点「⬆ 上传到云端」覆盖它，或在应用里把「云端路径」改成别的名字（如 <code>jxst3_tiku/backup2.json</code>）。<br>
+    <b>「同步失败（HTTP 5xx）」</b> → Worker 代码没粘贴完整，重新回到 2.4 全选覆盖一次。<br>
+    <b>想验证代理是否通</b> → 浏览器打开 <code>你的代理地址/jxst3_tiku/sync.json</code>，返回 <code>401</code> 就说明代理正常。</div></details>
     <details class="fold"><summary>首次使用：怎么配置 GitHub / Gitee 同步？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
-    <b>【GitHub 步骤】</b>建仓库后到 Settings → Developer settings → Personal access tokens → Fine-grained tokens → 权限选 <b>Contents: Read and write</b>（可限定单个仓库）→ 生成后粘贴到本页。<br>
-    <b>【Gitee 步骤】</b>登录 gitee.com → 右上「+」→「新建仓库」→ 记下<b>用户名/仓库名</b>；点头像 →「设置」→「安全设置」→「私人令牌」→ 勾选 <b>projects</b> → 生成后<b>立刻复制</b>；回到本页填用户名、仓库名、令牌。<br>
+    <b>【Gitee 步骤 · 推荐，国内快且不用代理】</b><br>
+    &nbsp;&nbsp;① 登录 <code>gitee.com</code> → 右上角「+」→「新建仓库」→ 仓库名随意（如 <code>jingxuan-sync</code>）→ 选「公开」或「私有」都行 → 创建；<br>
+    &nbsp;&nbsp;② 记下浏览器地址里的<b>用户名</b>和<b>仓库名</b>（形如 <code>gitee.com/你的用户名/仓库名</code>）；<br>
+    &nbsp;&nbsp;③ 右上角头像 →「设置」→ 左侧「安全设置」→「私人令牌」→「生成新令牌」→ <b>只勾选 projects</b> 即可 → 提交，<b>立刻复制那串令牌</b>（关掉页面就再也看不到了）；<br>
+    &nbsp;&nbsp;④ 回本页：平台选「Gitee 码云」→ 填用户名 / 仓库名 / 令牌 → 点「🔍 测试连接」→ 出现「云端还没有备份文件」即成功 → 点「⬆ 上传到云端」。<br><br>
+    <b>【GitHub 步骤】</b><br>
+    &nbsp;&nbsp;① 建一个仓库 → ② 右上头像 → Settings → Developer settings → Personal access tokens → <b>Fine-grained tokens</b> → Generate new token → Repository access 选中该仓库 → Permissions 里把 <b>Contents</b> 设为 <b>Read and write</b> → 生成后复制；<br>
+    &nbsp;&nbsp;③ 回本页：平台选「GitHub」→ 填 owner（用户名）/ repo（仓库名）/ 令牌 → 测试连接 → 上传。<br><br>
     <b>换设备</b>：在另一台设备填同样的配置，点「⬇ 从云端下载」即可恢复数据。</div></details></div>
     <div class="card"><h3>❓ 使用说明</h3>
     <details class="fold"><summary>「完整录入」和「快速建卡」有什么区别？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
@@ -1475,7 +1500,7 @@ function viewMine(){
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.2 · 支持坚果云/GitHub/Gitee 云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.3 · 支持坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
