@@ -180,6 +180,10 @@ function savePapers(){ DB.set('papers', papers); }
 function saveSessions(){ DB.set('sessions', sessions); }
 function saveWrongs(){ DB.set('wrongs', wrongs); }
 function saveSettings(){ DB.set('settings', settings); }
+// 云同步配置（独立 key，避免导入备份时被覆盖）
+const SYNC_DEF = { platform:'gitee', owner:'', repo:'', path:'jxst3_sync.json', branch:'', token:'', autoSync:false, lastSyncAt:0, lastSha:'' };
+let sync = Object.assign({}, SYNC_DEF, DB.get('sync', {}));
+function saveSync(){ DB.set('sync', sync); }
 // 结构：paper = { id, name, createdAt, questions:[{id, stem, options:{A:..}, answer, type}] }
 // 旧版数据迁移：v2（items）→ v3（questions）；不识别的记录清除
 (function migrate(){
@@ -408,61 +412,6 @@ function buildStats(session, questions){
   return { perQ, types, totalQ, answered, correct, scoreRate, avgTime, totalTime };
 }
 function mdCell(t){ return String(t == null ? '' : t).replace(/\|/g, '｜').replace(/\r?\n/g, ' '); }
-function buildReportMD(s, qs, st){
-  const L = [];
-  L.push(`# 刷题报告 · ${s.paperName}`);
-  L.push('');
-  L.push(`- **模式**：${s.mode === 'special' ? '专项练习（' + ((s.types||[]).join('、') || '未选题型') + '）' : '整卷模拟'}`);
-  L.push(`- **时间**：${fmtTime(s.startedAt)} ~ ${fmtTime(s.finishedAt)}`);
-  L.push(`- **得分率**：${st.totalQ ? Math.round(st.scoreRate * 100) + '%' : '--'}（答对 ${st.correct} / 计分题 ${st.totalQ}，实际作答 ${st.answered} 题）`);
-  L.push(`- **用时**：共 ${fmtSec(st.totalTime)}，平均每题 ${fmtSec(st.avgTime)}`);
-  L.push('');
-  L.push('## 一、题型统计');
-  L.push('');
-  L.push('| 题型 | 计分题 | 答对 | 得分率 | 平均用时 |');
-  L.push('|---|---|---|---|---|');
-  st.types.forEach(t => L.push(`| ${mdCell(t.type)} | ${t.scorable} | ${t.correct} | ${Math.round(t.rate * 100)}% | ${fmtSec(t.avgTime)} |`));
-  L.push('');
-  L.push('## 二、诊断建议');
-  L.push('');
-  const lowAcc = st.types.filter(t => t.scorable > 0 && t.rate < 0.6);
-  if(lowAcc.length) L.push(`- 🎯 **需提高准确率**：${lowAcc.map(t => `${t.type}（${Math.round(t.rate*100)}%）`).join('、')}——建议专项回炉`);
-  const slow = st.types.filter(t => t.avgTime > st.avgTime * 1.2 && t.avgTime > 0);
-  if(slow.length) L.push(`- 🐌 **需提高做题速度**：${slow.map(t => `${t.type} ${fmtSec(t.avgTime)}/题（全卷均值 ${fmtSec(st.avgTime)}）`).join('、')}`);
-  const fastOk = st.types.filter(t => t.scorable > 0 && t.rate >= 0.8 && t.avgTime <= st.avgTime);
-  if(fastOk.length) L.push(`- ✅ **状态良好**：${fastOk.map(t => t.type).join('、')}——保持手感即可`);
-  if(!st.answered) L.push('- 本次没有作答记录');
-  L.push('');
-  L.push('## 三、逐题明细');
-  L.push('');
-  L.push('| # | 题型 | 结果 | 你的答案 | 正确答案 | 用时 | 标记 |');
-  L.push('|---|---|---|---|---|---|---|');
-  st.perQ.forEach(r => {
-    L.push(`| ${r.num} | ${mdCell(r.type)} | ${r.skipped ? '跳过' : (r.correct ? '✓' : '✗')} | ${r.skipped ? '—' : (r.choice || '未涂')} | ${r.answer || '未设'} | ${r.skipped ? '—' : fmtSec(r.time)} | ${r.marked ? '🚩' : ''} |`);
-  });
-  const wrongRows = st.perQ.filter(r => !r.skipped && !r.correct && r.answer);
-  if(wrongRows.length){
-    L.push('');
-    L.push(`## 四、错题回顾（${wrongRows.length} 题）`);
-    wrongRows.forEach(r => {
-      const q = qs.find(x => x.id === r.qid); if(!q) return;
-      L.push('');
-      L.push(`### 第 ${r.num} 题 · ${r.type}`);
-      if(q.stem){ L.push(''); L.push(q.stem); }
-      const keys = Object.keys(q.options || {}).sort();
-      if(keys.some(k => q.options[k])){
-        L.push('');
-        keys.forEach(k => { if(q.options[k]) L.push(`- ${k}. ${q.options[k]}`); });
-      }
-      L.push('');
-      L.push(`> 你的答案：${r.choice || '未涂'} ｜ 正确答案：**${r.answer}** ｜ 用时 ${fmtSec(r.time)}`);
-    });
-  }
-  L.push('');
-  L.push('---');
-  L.push(`*由「京选刷题」导出于 ${fmtTime(Date.now())}*`);
-  return L.join('\n');
-}
 // ---------- 报告导出 ----------
 function reportToMarkdown(s, qs, st){
   const L = [];
@@ -559,6 +508,103 @@ function downloadText(text, filename, mime){
     setTimeout(() => URL.revokeObjectURL(url), 3000);
     toast('已导出：' + filename);
   }catch(e){ toast('导出失败：' + e.message); }
+}
+
+// ---------- 云同步 · 纯函数（可单测） ----------
+// UTF-8 字符串 → base64（中文/emoji 必须先经 TextEncoder，直接 btoa 会抛错）
+function u8ToBase64(str){
+  const bytes = new TextEncoder().encode(String(str));
+  let bin = '';
+  const CH = 0x8000;                       // 分块防超长参数栈溢出
+  for(let i = 0; i < bytes.length; i += CH){
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  }
+  return btoa(bin);
+}
+// base64 → UTF-8 字符串（API 返回可能含换行，先去掉空白）
+function base64ToU8(b64){
+  const clean = String(b64).replace(/[\s\r\n]/g, '');
+  const bin = atob(clean);
+  const bytes = new Uint8Array(bin.length);
+  for(let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder('utf-8').decode(bytes);
+}
+// 组装备份对象（与「导出备份」格式完全一致）
+function buildSyncPayload(papers, sessions, wrongs, settings){
+  return { app: '京选刷题', version: 3, exportedAt: Date.now(),
+           papers: papers || [], sessions: sessions || [], wrongs: wrongs || [], settings: settings || {} };
+}
+// 规范化备份数据（校验 + 旧结构迁移 + 脏数据过滤），非法抛错
+function normalizeBackup(d){
+  if(!d || typeof d !== 'object' || (!Array.isArray(d.papers) && !Array.isArray(d.items))) throw new Error('云端数据格式不正确');
+  const rawPapers = d.papers || d.items || [];
+  let papers = rawPapers.filter(p => p && (Array.isArray(p.questions) || Array.isArray(p.items)));
+  papers = papers.map(p => Array.isArray(p.questions) ? p : {
+    id: p.id || ('p_' + Math.random().toString(36).slice(2, 9)),
+    name: p.name || '未命名试卷', createdAt: p.createdAt || Date.now(),
+    questions: (p.items || []).map(it => ({ id: it.id || ('q_' + Math.random().toString(36).slice(2, 9)),
+      stem: it.stem || '', options: it.options || { A:'', B:'', C:'', D:'' }, answer: it.answer || '', type: it.type || '未分类' }))
+  });
+  const sessions = (d.sessions || []).filter(s => s && Array.isArray(s.qids));
+  const wrongs = (d.wrongs || []).filter(w => w && w.q);
+  return { papers, sessions, wrongs, settings: (d.settings && typeof d.settings === 'object') ? d.settings : {} };
+}
+// 解析云端返回的备份对象
+function parseSyncPayload(obj){ return normalizeBackup(obj); }
+// 平台端点：Gitee 创建用 POST / 更新用 PUT；GitHub 均用 PUT
+function syncEndpoint(platform, cfg){
+  const owner = String(cfg.owner || '').trim();
+  const repo = String(cfg.repo || '').trim();
+  const path = String(cfg.path || 'jxst3_sync.json').split('/').map(encodeURIComponent).join('/');
+  if(platform === 'github'){
+    return { url: `https://api.github.com/repos/${owner}/${repo}/contents/${path}`, methodCreate: 'PUT', methodUpdate: 'PUT' };
+  }
+  return { url: `https://gitee.com/api/v5/repos/${owner}/${repo}/contents/${path}`, methodCreate: 'POST', methodUpdate: 'PUT' };
+}
+// 请求头（Gitee 令牌走 body/query，GitHub 走 Authorization）
+function syncHeaders(platform, token){
+  if(platform === 'github'){
+    return { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' };
+  }
+  return { 'Content-Type': 'application/json' };
+}
+// 构造 GET 请求 URL（Gitee 令牌放 query，GitHub 放 header）
+function syncGetConfig(platform, cfg){
+  const ep = syncEndpoint(platform, cfg);
+  let url = ep.url;
+  if(platform !== 'github'){ url += (url.includes('?') ? '&' : '?') + 'access_token=' + encodeURIComponent(cfg.token || ''); }
+  if(cfg.branch) url += (url.includes('?') ? '&' : '?') + 'ref=' + encodeURIComponent(cfg.branch);
+  return { url, headers: syncHeaders(platform, cfg.token) };
+}
+// 构造写入请求 body
+function syncBuildWriteBody(platform, cfg, b64, sha, isCreate){
+  const body = { content: b64, message: syncCommitMessage(Date.now()) };
+  if(cfg.branch) body.branch = cfg.branch;
+  if(platform === 'gitee') body.access_token = cfg.token || '';
+  if(!isCreate && sha) body.sha = sha;     // 更新必须带 sha；创建不带
+  return body;
+}
+// 从 GET 响应提取内容与 sha
+function decodeRemoteContent(got){
+  if(!got || typeof got.content !== 'string') throw new Error('云端返回内容异常');
+  return { text: base64ToU8(got.content), sha: got.sha || '' };
+}
+function syncCommitMessage(ts){
+  const d = new Date(ts || Date.now()), p = n => String(n).padStart(2, '0');
+  return `京选刷题同步 ${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+// 状态码 → 中文提示
+function fmtSyncError(status, platform){
+  const name = platform === 'github' ? 'GitHub' : 'Gitee';
+  switch(status){
+    case 401: return `令牌无效或已过期，请到 ${name} 重新生成`;
+    case 403: return `令牌没有仓库读写权限（${name === 'Gitee' ? 'Gitee 需勾选 projects' : 'GitHub 需 Contents: Read and write'}）`;
+    case 404: return `仓库或分支不存在，请检查 owner / repo / 分支`;
+    case 409: return `云端已被其它设备修改，请先点【下载】合并，再上传`;
+    case 422: return `提交被拒绝（可能是 sha 冲突），请先点【下载】再上传`;
+    case 429: return `请求过于频繁，请稍后再试`;
+    default:  return `同步失败（HTTP ${status}），请检查配置或稍后重试`;
+  }
 }
 
 //CORE>>>
@@ -671,10 +717,11 @@ function viewLibrary(){
       p.questions.forEach(q => { byType[q.type || '未分类'] = (byType[q.type||'未分类']||0) + 1; });
       const typesStr = Object.keys(byType).map(k => `${k}×${byType[k]}`).join('　');
       const fullN = p.questions.filter(hasContent).length;
+      const onAnsN = ongoing ? ongoing.qids.filter(id => ongoing.answers[id]).length : 0;
       html += `<div class="card paper-item">
         <div class="meta"><div class="name">${esc(p.name)}</div>
-        <div class="muted">${p.questions.length} 题 · 带题干${fullN}题 · ${esc(typesStr)}${ongoing ? ' · <span style="color:var(--orange)">有未完成练习</span>' : ''}</div></div>
-        <button class="btn btn-primary btn-sm" data-act="quiz-config" data-pid="${p.id}">去刷题</button>
+        <div class="muted">${p.questions.length} 题 · 带题干${fullN}题 · ${esc(typesStr)}${ongoing ? ` · <span style="color:var(--orange)">未完成练习（已答 ${onAnsN} 题）</span>` : ''}</div></div>
+        ${ongoing ? `<button class="btn btn-primary btn-sm" data-act="quiz-resume" data-sid="${ongoing.id}">▶ 继续做题</button>` : `<button class="btn btn-primary btn-sm" data-act="quiz-config" data-pid="${p.id}">去刷题</button>`}
         <button class="btn btn-sm" data-act="edit-open" data-pid="${p.id}">编辑</button>
         <button class="btn btn-sm btn-danger" data-act="del-paper" data-pid="${p.id}">删</button></div>`;
     });
@@ -955,6 +1002,8 @@ function enterQuiz(sid){
   state.quizView = true; state.tab = 'quiz'; state.sheetOpen = false;
   state.quiz = { sessionId: sid, pos, shownAt: Date.now() };
   render();
+  const answeredN = s.qids.filter(id => s.answers[id]).length;
+  if(answeredN) toast(`已恢复进度，从第 ${pos + 1} 题继续（已答 ${answeredN}/${s.qids.length}）`);
 }
 function curInfo(){
   const s = currentSession(), q = state.quiz;
@@ -996,6 +1045,15 @@ function toggleMark(){
   const a = s.answers[cur.question.id];
   if(a){ a.marked = !a.marked; saveSessions(); render(); } else { toast('请先作答本题再标记'); }
 }
+function saveQuiz(){
+  const s = currentSession();
+  if(!s){ state.quizView = false; state.quiz = null; state.tab = 'quiz'; render(); return; }
+  s.pos = state.quiz ? state.quiz.pos : (s.pos || 0);      // 记录当前题号，便于下次续做
+  saveSessions();
+  const answeredN = s.qids.filter(id => s.answers[id]).length;
+  state.quizView = false; state.quiz = null; state.sheetOpen = false; state.tab = 'quiz'; render();
+  toast(`💾 已保存进度（已答 ${answeredN}/${s.qids.length} 题），可随时回来继续`);
+}
 function finishQuiz(){
   const s = currentSession();
   if(!s) return;
@@ -1016,6 +1074,7 @@ function finishQuiz(){
     saveWrongs();
   }
   state.quizView = false; state.quiz = null; state.sheetOpen = false; state.tab = 'report'; state.reportOpenId = s.id; render();
+  syncAutoPush();
 }
 function viewQuizRun(){
   const s = currentSession(), q = state.quiz;
@@ -1061,9 +1120,10 @@ function viewQuizRun(){
   }
   return `<div class="quiz-wrap">
     <div class="quiz-top"><div class="bar">
-      <span class="backlink" data-act="quiz-pause">‹ 暂存</span>
+      <span class="backlink" data-act="quiz-pause">‹ 退出</span>
       <span class="timer ${remain !== null && remain < 300 ? 'warn' : ''}" id="quizTimer">${remain !== null ? '⏱ 剩余 ' + fmtClock(remain) : '⏱ ' + fmtClock((Date.now() - s.startedAt) / 1000)}</span>
       <span>${q.pos + 1}/${cur.total} · 已答${answeredN}</span>
+      <button class="btn btn-sm" data-act="quiz-save">💾 保存</button>
       <button class="btn btn-primary btn-sm" data-act="quiz-finish">交卷</button></div>
       <div class="progress"><i style="width:${Math.round(answeredN / cur.total * 100)}%"></i></div></div>
     <div class="q-body">${body}</div>
@@ -1073,6 +1133,7 @@ function viewQuizRun(){
       <button class="mark-btn ${marked ? 'on' : ''}" data-act="quiz-mark" title="标记">🚩</button>
       <button class="btn" data-act="quiz-skip">跳过</button>
       <div class="grow"></div>
+      <button class="btn" data-act="quiz-save">💾 保存</button>
       ${q.pos + 1 >= cur.total ? '<button class="btn btn-primary" data-act="quiz-finish">交卷</button>' : '<button class="btn btn-primary" data-act="quiz-next">下一题 ›</button>'}
     </div>${sheetHTML}</div>`;
 }
@@ -1243,7 +1304,27 @@ function viewMine(){
       <label class="btn" style="margin:0">导入备份<input type="file" id="importFile" accept=".json,application/json" style="display:none" data-act="import-data"></label>
       <button class="btn" data-act="load-demo">载入示例卷</button>
       <button class="btn btn-danger" data-act="clear-all">清空全部数据</button></div>
-    <div class="muted" style="margin-top:8px">所有数据仅保存在当前浏览器。换设备/换浏览器前请先导出备份。</div></div>
+    <div class="muted" style="margin-top:8px">所有数据仅保存在当前浏览器。换设备/换浏览器前请先导出备份，或用下方「云同步」。</div></div>
+    <div class="card"><h3>☁️ 云同步</h3>
+    <div class="setrow"><span>平台</span>
+      <select data-act="sync-platform" style="width:150px">
+        <option value="gitee" ${sync.platform==='gitee'?'selected':''}>Gitee 码云</option>
+        <option value="github" ${sync.platform==='github'?'selected':''}>GitHub</option>
+      </select></div>
+    <div class="setrow"><span>用户名 owner</span><input type="text" data-act="sync-owner" value="${esc(sync.owner||'')}" placeholder="如 whitepaws" style="width:150px"></div>
+    <div class="setrow"><span>仓库 repo</span><input type="text" data-act="sync-repo" value="${esc(sync.repo||'')}" placeholder="如 jingxuan-sync" style="width:150px"></div>
+    <div class="setrow"><span>分支（可空）</span><input type="text" data-act="sync-branch" value="${esc(sync.branch||'')}" placeholder="默认 master/main" style="width:150px"></div>
+    <div class="setrow"><span>文件路径</span><input type="text" data-act="sync-path" value="${esc(sync.path||'jxst3_sync.json')}" style="width:150px"></div>
+    <div class="setrow"><span>令牌 token</span><input type="password" data-act="sync-token" value="${esc(sync.token||'')}" placeholder="仅存本机，可随时吊销" style="width:150px"></div>
+    <div class="setrow"><span>交卷后自动上传</span><label class="switch"><input type="checkbox" data-act="sync-auto" ${sync.autoSync?'checked':''}><i></i></label></div>
+    <div class="row" style="flex-wrap:wrap;margin-top:8px">
+      <button class="btn btn-primary" data-act="sync-upload">⬆ 上传到云端</button>
+      <button class="btn" data-act="sync-download">⬇ 从云端下载</button></div>
+    <div class="muted" style="margin-top:8px">${sync.lastSyncAt ? '上次同步：' + fmtTime(sync.lastSyncAt) : '尚未同步'} · 令牌仅存在本机浏览器，怀疑泄露可到平台后台删除</div>
+    <details class="fold" style="margin-top:10px"><summary>首次使用：怎么配置云同步？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
+    <b>【Gitee 步骤】</b>① 登录 gitee.com → 右上「+」→「新建仓库」→ 建议勾「私有」→ 记下地址里的<b>用户名/仓库名</b>；② 点头像 →「设置」→「安全设置」→「私人令牌」→「生成新令牌」→ 勾选 <b>projects</b> → 提交后<b>立刻复制</b>（只显示一次）；③ 回到本页：平台选 Gitee，填用户名、仓库名、粘贴令牌，分支留空即可，点「⬆ 上传到云端」。<br>
+    <b>【GitHub 步骤】</b>建仓库后到 Settings → Developer settings → Personal access tokens → Fine-grained tokens → 权限选 <b>Contents: Read and write</b>（可限定单个仓库）→ 生成后粘贴到本页。<br>
+    <b>换设备</b>：在另一台设备填同样的平台/用户名/仓库/令牌，点「⬇ 从云端下载」即可恢复数据。</div></details></div>
     <div class="card"><h3>❓ 使用说明</h3>
     <details class="fold"><summary>「完整录入」和「快速建卡」有什么区别？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     完整录入：粘贴/PDF 上传含题干选项的文本，刷题时显示粉笔式界面（题干+选项文字）。快速建卡：一键生成<b>北京选调 65 题标准结构</b>（政治理论10 · 常识判断10 · 言语理解10 · 数量关系5 · 图形推理5 · 逻辑判断10 · 科学推理5 · 资料分析10），只填答案即可，作答时大题号+字母涂卡；题量不对可点「改题量」。第二步「批量设置题型」里还有「📋 套用北京选调标准」按钮，可随时把题型重排为标准结构。<b>同一份卷里两者可混用</b>——没录题干的题自动降级为纯字母涂卡。</div></details>
@@ -1253,6 +1334,8 @@ function viewMine(){
     单题模式：切到某题开始计时，点下选项立即停表记为该题用时，随后自动跳下一题（可关闭）。跳过的题不计时；回看已答题修改答案不重复计时。点底部「答题卡」可打开网格总览跳题。</div></details>
     <details class="fold"><summary>报告能导出吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     能。打开「报告」里任意一条记录，底部有 <b>📄 导出报告为 Markdown（.md）</b>，一键下载含总览、题型统计、诊断建议、逐题明细、错题回顾的 Markdown 文件，可直接传电脑/进笔记软件/交给 AI 分析；旁边还有「导出原始数据(.json)」给进阶用途。文件默认下载到浏览器下载目录。</div></details>
+    <details class="fold"><summary>答题中途能保存退出吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
+    <b>能。</b>答题页顶部和底部都有 <b>💾 保存</b> 按钮（交卷旁边），点一下即保存全部作答和当前题号并退出。回到「题库」，该试卷会显示「未完成练习（已答 N 题）」和 <b>▶ 继续做题</b> 按钮，点进去自动跳回上次离开的题号继续答。左上角「‹ 退出」也是同样的保存逻辑（仅多一次确认）。</div></details>
     <details class="fold"><summary>做题做到一半刷新/离开会丢记录吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     <b>不会。</b>每勾选一题即写入本地存储；切换题目、切到后台、锁屏、刷新、关闭页面都会兜底保存。重新进入该试卷时会自动回到上次离开的题号（没有则跳到第一道未答题）。若该试卷已有进行中的练习，点「开始」会先问你是续做还是重开，避免误开新卷看不到旧答案。</div></details>
     <details class="fold"><summary>报告怎么帮我定位弱项？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
@@ -1261,8 +1344,97 @@ function viewMine(){
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v3.7 · 粉笔式刷题 + 答题卡 · 纯本地离线</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v3.8 · 粉笔式刷题 + 答题卡 · 支持云同步</div>`;
 }
+
+// ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
+function syncReady(){
+  const miss = [];
+  if(!String(sync.owner||'').trim()) miss.push('用户名(owner)');
+  if(!String(sync.repo||'').trim()) miss.push('仓库名(repo)');
+  if(!String(sync.token||'').trim()) miss.push('令牌');
+  return { ok: miss.length === 0, miss };
+}
+let syncing = false;
+// 读取云端文件；不存在返回 {exists:false}
+async function syncGetRemote(){
+  const cfg = { owner: sync.owner, repo: sync.repo, path: sync.path || 'jxst3_sync.json', branch: sync.branch, token: sync.token };
+  const g = syncGetConfig(sync.platform, cfg);
+  let res;
+  try{ res = await fetch(g.url, { method: 'GET', headers: g.headers }); }
+  catch(e){ throw new Error('网络异常，无法连接云平台（离线或被浏览器拦截）'); }
+  if(res.status === 404) return { exists: false };
+  if(!res.ok) throw new Error(fmtSyncError(res.status, sync.platform));
+  let got;
+  try{ got = await res.json(); }
+  catch(e){ throw new Error('云端返回了非预期内容，请检查仓库/路径是否正确'); }
+  const dec = decodeRemoteContent(got);
+  let data;
+  try{ data = parseSyncPayload(JSON.parse(dec.text)); }
+  catch(e){ throw new Error('云端文件不是有效备份，已中止以免覆盖本地'); }
+  return { exists: true, sha: dec.sha, data };
+}
+// 上传：打包本地 → 写云端（先 GET 取 sha 判断创建/更新）
+async function syncUpload(silent){
+  if(syncing){ if(!silent) toast('同步进行中，请稍候'); return; }
+  const rd = syncReady();
+  if(!rd.ok){ if(!silent) toast('请先填写：' + rd.miss.join('、')); return; }
+  syncing = true;
+  if(!silent) toast('正在上传…');
+  try{
+    const cfg = { owner: sync.owner, repo: sync.repo, path: sync.path || 'jxst3_sync.json', branch: sync.branch, token: sync.token };
+    let remote = { exists: false, sha: '' };
+    try{ remote = await syncGetRemote(); }catch(e){ if(!/不是有效备份|非预期内容/.test(e.message)) throw e; }
+    const b64 = u8ToBase64(JSON.stringify(buildSyncPayload(papers, sessions, wrongs, settings), null, 1));
+    const ep = syncEndpoint(sync.platform, cfg);
+    const isCreate = !remote.exists;
+    const method = isCreate ? ep.methodCreate : ep.methodUpdate;
+    const url = (sync.platform === 'github' && !isCreate) ? ep.url : ep.url;
+    const body = syncBuildWriteBody(sync.platform, cfg, b64, remote.sha, isCreate);
+    let res;
+    try{ res = await fetch(url, { method, headers: syncHeaders(sync.platform, sync.token), body: JSON.stringify(body) }); }
+    catch(e){ throw new Error('网络异常，无法连接云平台（离线或被浏览器拦截）'); }
+    if(!res.ok) throw new Error(fmtSyncError(res.status, sync.platform));
+    sync.lastSyncAt = Date.now();
+    try{ const rj = await res.json(); sync.lastSha = (rj.content && rj.content.sha) || remote.sha || ''; }catch(e){ sync.lastSha = remote.sha || ''; }
+    saveSync();
+    if(!silent) toast('✅ 已上传到云端');
+    return true;
+  }catch(e){
+    if(silent) console.warn('[sync] 自动上传失败：', e.message);
+    else toast('上传失败：' + e.message);
+    return false;
+  }finally{ syncing = false; }
+}
+// 下载：拉云端 → 覆盖本地
+async function syncDownload(interactive){
+  if(syncing){ toast('同步进行中，请稍候'); return; }
+  const rd = syncReady();
+  if(!rd.ok){ toast('请先填写：' + rd.miss.join('、')); return; }
+  syncing = true;
+  try{
+    toast('正在下载…');
+    const remote = await syncGetRemote();
+    if(!remote.exists){ toast('云端还没有备份，请先点【上传到云端】'); return; }
+    const d = remote.data;
+    if(interactive !== false && !confirm(`将用云端数据【覆盖】本机全部数据：\n\n试卷 ${d.papers.length} 套 · 记录 ${d.sessions.length} 条 · 错题 ${d.wrongs.length} 道\n\n本机当前数据将被替换，确定继续吗？`)) return;
+    papers = d.papers; sessions = d.sessions; wrongs = d.wrongs;
+    settings = Object.assign({}, settings, d.settings || {});
+    savePapers(); saveSessions(); saveWrongs(); saveSettings();
+    sync.lastSyncAt = Date.now(); sync.lastSha = remote.sha || ''; saveSync();
+    state.reportOpenId = null; state.quizView = false; state.quiz = null;
+    render();
+    toast('✅ 已从云端同步到本机');
+  }catch(e){ toast('下载失败：' + e.message); }
+  finally{ syncing = false; }
+}
+// 自动同步（交卷时调用，静默失败）
+function syncAutoPush(){
+  if(sync.autoSync && syncReady().ok){
+    try{ syncUpload(true); }catch(e){ console.warn('[sync]', e); }
+  }
+}
+
 function exportData(){
   const data = JSON.stringify({ app: '京选刷题', version: 3, exportedAt: Date.now(), papers, sessions, wrongs, settings }, null, 1);
   const blob = new Blob([data], { type: 'application/json' });
@@ -1272,34 +1444,17 @@ function exportData(){
   document.body.appendChild(a); a.click(); a.remove();
   toast('备份已导出');
 }
-function exportReportMD(){
-  const s = sessions.find(x => x.id === state.reportOpenId); if(!s) return;
-  const p = papers.find(x => x.id === s.paperId);
-  const qs = p ? s.qids.map(id => p.questions.find(q => q.id === id)).filter(Boolean) : [];
-  const st = buildStats(s, qs);
-  const md = buildReportMD(s, qs, st);
-  const blob = new Blob(['\ufeff' + md], { type: 'text/markdown;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `刷题报告_${s.paperName.replace(/[\\\/:*?"<>|]/g, '')}_${new Date().toISOString().slice(0, 10)}.md`;
-  document.body.appendChild(a); a.click(); a.remove();
-  toast('报告已导出为 .md 文件');
-}
 function importData(file){
   const reader = new FileReader();
   reader.onload = () => {
     try{
-      const d = JSON.parse(reader.result);
-      if(!d.papers) throw new Error('文件格式不对');
-      if(!confirm(`将导入 ${d.papers.length} 套试卷、${(d.sessions||[]).length} 条记录，并【覆盖】当前全部数据，确定？`)) return;
-      papers = (d.papers||[]).filter(p => Array.isArray(p.questions) || Array.isArray(p.items));
-      sessions = (d.sessions||[]).filter(s => Array.isArray(s.qids) || typeof s.n === 'number');
-      wrongs = (d.wrongs||[]).filter(w => w && (w.q || typeof w.num === 'number'));
+      const raw = JSON.parse(reader.result);
+      if(!raw.papers && !raw.items) throw new Error('文件格式不对');
+      const cnt = (raw.papers || raw.items || []).length;
+      if(!confirm(`将导入 ${cnt} 套试卷、${(raw.sessions||[]).length} 条记录，并【覆盖】当前全部数据，确定？`)) return;
+      const d = normalizeBackup(raw);          // 复用统一的校验/迁移/清洗逻辑
+      papers = d.papers; sessions = d.sessions; wrongs = d.wrongs;
       settings = Object.assign(settings, d.settings || {});
-      // 兼容旧结构
-      papers = papers.map(p => Array.isArray(p.questions) ? p : { id: p.id || uid('p'), name: p.name, createdAt: p.createdAt || Date.now(), questions: p.items.map(it => ({ id: uid('q'), stem: '', options: {A:'',B:'',C:'',D:''}, answer: it.answer || '', type: it.type || '未分类' })) });
-      sessions = sessions.filter(s => Array.isArray(s.qids));
-      wrongs = wrongs.filter(w => w.q);
       savePapers(); saveSessions(); saveWrongs(); saveSettings();
       toast('导入成功'); state.tab = 'library'; render();
     }catch(e){ toast('导入失败：' + e.message); }
@@ -1347,7 +1502,8 @@ document.addEventListener('click', e => {
     case 'quiz-prev': prevQ(); break;
     case 'quiz-mark': toggleMark(); break;
     case 'quiz-finish': finishQuiz(); break;
-    case 'quiz-pause': { if(confirm('暂存退出？进度已保存，可随时回来继续。')){ state.quizView = false; state.quiz = null; state.sheetOpen = false; state.tab = 'quiz'; render(); } break; }
+    case 'quiz-save': saveQuiz(); break;
+    case 'quiz-pause': { if(confirm('退出答题？进度已自动保存，可从题库点该试卷继续。')){ state.quizView = false; state.quiz = null; state.sheetOpen = false; state.tab = 'quiz'; render(); } break; }
     case 'quiz-skip': { const s = currentSession(); const cur = curInfo(); if(cur && !s.answers[cur.question.id]){ s.answers[cur.question.id] = { choice: '', correct: false, time: 0 }; saveSessions(); } nextQ(); break; }
     case 'sheet-open': state.sheetOpen = true; render(); break;
     case 'sheet-close': state.sheetOpen = false; render(); break;
@@ -1363,7 +1519,8 @@ document.addEventListener('click', e => {
     case 'wrong-pick': wrongPick(el.dataset.key); break;
     case 'wrong-redo-exit': state.wrongRedo = null; state.tab = 'wrong'; render(); break;
     case 'export-data': exportData(); break;
-    case 'export-report-md': exportReportMD(); break;
+    case 'sync-upload': syncUpload(false); break;
+    case 'sync-download': syncDownload(true); break;
     case 'clear-all': if(confirm('确定清空全部数据（试卷/记录/错题）？不可恢复！') && confirm('再次确认：真的要清空吗？')){ papers = []; sessions = []; wrongs = []; settings = { autoNext: true, timeLimit: 150, seenGuide: true }; savePapers(); saveSessions(); saveWrongs(); saveSettings(); render(); toast('已清空'); } break;
     case 'q-del': imp.questions = imp.questions.filter(q => q.id !== el.dataset.qid); render(); break;
     case 'q-add': imp.questions.push({ id: uid('q'), stem: '', options: { A:'',B:'',C:'',D:'' }, answer: '', type: '未分类' }); render(); break;
@@ -1384,6 +1541,13 @@ document.addEventListener('change', e => {
   else if(act === 'set-timelimit'){ settings.timeLimit = Math.max(0, +el.value || 0); saveSettings(); }
   else if(act === 'import-data'){ if(el.files && el.files[0]) importData(el.files[0]); el.value = ''; }
   else if(act === 'wrong-show-resolved'){ state.wrongShowResolved = el.checked; render(); }
+  else if(act === 'sync-owner'){ sync.owner = el.value.trim(); saveSync(); }
+  else if(act === 'sync-repo'){ sync.repo = el.value.trim(); saveSync(); }
+  else if(act === 'sync-branch'){ sync.branch = el.value.trim(); saveSync(); }
+  else if(act === 'sync-path'){ sync.path = (el.value.trim() || 'jxst3_sync.json'); saveSync(); }
+  else if(act === 'sync-token'){ sync.token = el.value.trim(); saveSync(); }
+  else if(act === 'sync-platform'){ sync.platform = el.value; saveSync(); render(); }
+  else if(act === 'sync-auto'){ sync.autoSync = el.checked; saveSync(); toast(sync.autoSync ? '已开启交卷后自动上传' : '已关闭自动上传'); }
   if(e.target && e.target.name === 'qmode'){
     const box = document.querySelector('#specialBox'); if(box) box.style.display = e.target.value === 'special' ? 'block' : 'none';
   }
