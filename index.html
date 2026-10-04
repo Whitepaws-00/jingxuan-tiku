@@ -150,7 +150,7 @@ details.fold summary{cursor:pointer;font-weight:600;font-size:14px}
 <script>
 'use strict';
 /* ============================================================
-   京选刷题 v3 · 粉笔式刷题 + 答题卡 双模式
+   京选刷题 v4.1 · 粉笔式刷题 + 答题卡 双模式
    - 完整录入（题干+选项+答案，粘贴文本/PDF 解析）→ 粉笔式单题作答
    - 快速建卡（仅题型+答案）→ 纯字母涂卡（自动降级）
    - 每题计时 · 题型得分率 · 双维度诊断 · 错题本 · 本地离线
@@ -183,7 +183,8 @@ function saveSessions(){ DB.set('sessions', sessions); }
 function saveWrongs(){ DB.set('wrongs', wrongs); }
 function saveSettings(){ DB.set('settings', settings); }
 // 云同步配置（独立 key，避免导入备份时被覆盖）
-const SYNC_DEF = { platform:'gitee', owner:'', repo:'', path:'jxst3_sync.json', branch:'', token:'', autoSync:false, lastSyncAt:0, lastSha:'' };
+const SYNC_DEF = { platform:'nutstore', owner:'', repo:'', path:'jxst3_sync.json', branch:'', token:'', autoSync:false, lastSyncAt:0, lastSha:'',
+                   nuEmail:'', nuPassword:'', nuProxy:'', nuPath:'jxst3_tiku/sync.json' };
 let sync = Object.assign({}, SYNC_DEF, DB.get('sync', {}));
 function saveSync(){ DB.set('sync', sync); }
 // 结构：paper = { id, name, createdAt, questions:[{id, stem, options:{A:..}, answer, type}] }
@@ -553,8 +554,35 @@ function normalizeBackup(d){
 }
 // 解析云端返回的备份对象
 function parseSyncPayload(obj){ return normalizeBackup(obj); }
-// 平台端点：Gitee 创建用 POST / 更新用 PUT；GitHub 均用 PUT
+
+// ===== 坚果云 WebDAV =====
+// 认证：Basic base64(email:应用密码)，需 UTF-8 编码
+function nutstoreAuth(email, appPassword){
+  const raw = String(email || '') + ':' + String(appPassword || '');
+  return 'Basic ' + u8ToBase64(raw);
+}
+// 规范化 WebDAV 路径（相对路径 → 以 / 开头，逐段编码）
+function nutstoreDavPath(p){
+  let s = String(p || 'jxst3_tiku/sync.json').trim().replace(/^\/+/, '');
+  if(!s) s = 'jxst3_tiku/sync.json';
+  return '/' + s.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+}
+// 目标 URL：有代理走代理域名，无代理直连（浏览器会被 CORS 拦，仅线下/插件环境可用）
+function nutstoreUrl(cfg, forWrite){
+  const davPath = nutstoreDavPath(cfg.nuPath);
+  const proxy = String(cfg.nuProxy || '').trim().replace(/\/+$/, '');
+  if(proxy) return proxy + davPath;
+  return 'https://dav.jianguoyun.com/dav' + davPath;
+}
+function nutstoreHeaders(cfg){
+  return { 'Authorization': nutstoreAuth(cfg.nuEmail, cfg.nuPassword), 'Content-Type': 'application/json' };
+}
+
+// 平台端点：Gitee 创建用 POST / 更新用 PUT；GitHub 均用 PUT；坚果云 WebDAV 均用 PUT
 function syncEndpoint(platform, cfg){
+  if(platform === 'nutstore'){
+    return { url: nutstoreUrl(cfg, false), methodCreate: 'PUT', methodUpdate: 'PUT' };
+  }
   const owner = String(cfg.owner || '').trim();
   const repo = String(cfg.repo || '').trim();
   const path = String(cfg.path || 'jxst3_sync.json').split('/').map(encodeURIComponent).join('/');
@@ -563,23 +591,28 @@ function syncEndpoint(platform, cfg){
   }
   return { url: `https://gitee.com/api/v5/repos/${owner}/${repo}/contents/${path}`, methodCreate: 'POST', methodUpdate: 'PUT' };
 }
-// 请求头（Gitee 令牌走 body/query，GitHub 走 Authorization）
+// 请求头（Gitee 令牌走 body/query，GitHub 走 Authorization，坚果云走 Basic）
 function syncHeaders(platform, token){
   if(platform === 'github'){
     return { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' };
   }
+  if(platform === 'nutstore'){
+    return { 'Authorization': token, 'Content-Type': 'application/json' };
+  }
   return { 'Content-Type': 'application/json' };
 }
-// 构造 GET 请求 URL（Gitee 令牌放 query，GitHub 放 header）
+// 构造 GET 请求 URL（Gitee 令牌放 query，GitHub 放 header，坚果云无特殊）
 function syncGetConfig(platform, cfg){
   const ep = syncEndpoint(platform, cfg);
   let url = ep.url;
-  if(platform !== 'github'){ url += (url.includes('?') ? '&' : '?') + 'access_token=' + encodeURIComponent(cfg.token || ''); }
+  if(platform === 'gitee'){ url += (url.includes('?') ? '&' : '?') + 'access_token=' + encodeURIComponent(cfg.token || ''); }
+  if(platform === 'nutstore'){ return { url, headers: nutstoreHeaders(cfg) }; }
   if(cfg.branch) url += (url.includes('?') ? '&' : '?') + 'ref=' + encodeURIComponent(cfg.branch);
   return { url, headers: syncHeaders(platform, cfg.token) };
 }
-// 构造写入请求 body
+// 构造写入请求 body（坚果云 WebDAV 直接 PUT 原始内容，不用 JSON 包装）
 function syncBuildWriteBody(platform, cfg, b64, sha, isCreate){
+  if(platform === 'nutstore') return base64ToU8(b64);      // WebDAV：body 即文件原文
   const body = { content: b64, message: syncCommitMessage(Date.now()) };
   if(cfg.branch) body.branch = cfg.branch;
   if(platform === 'gitee') body.access_token = cfg.token || '';
@@ -597,6 +630,17 @@ function syncCommitMessage(ts){
 }
 // 状态码 → 中文提示
 function fmtSyncError(status, platform){
+  if(platform === 'nutstore'){
+    switch(status){
+      case 401: return '坚果云账号或应用密码错误（密码要用「安全选项」里生成的应用密码，不是登录密码）';
+      case 403: return '坚果云拒绝访问，请确认账号已开启 WebDAV 且路径有权限';
+      case 404: return '坚果云上还没有这个文件（首次点【上传】即可创建）';
+      case 405: case 501: return '坚果云不支持该操作，请检查 Worker 代理是否正常转发';
+      case 507: return '坚果云空间不足，请清理后再试';
+      case 429: return '请求过于频繁，请稍后再试';
+      default:  return `同步失败（HTTP ${status}），请检查账号/应用密码/代理地址`;
+    }
+  }
   const name = platform === 'github' ? 'GitHub' : 'Gitee';
   switch(status){
     case 401: return `令牌无效或已过期，请到 ${name} 重新生成`;
@@ -1342,23 +1386,67 @@ function viewMine(){
     <div class="card"><h3>☁️ 云同步</h3>
     <div class="setrow"><span>平台</span>
       <select data-act="sync-platform" style="width:150px">
-        <option value="gitee" ${sync.platform==='gitee'?'selected':''}>Gitee 码云</option>
+        <option value="nutstore" ${sync.platform==='nutstore'?'selected':''}>坚果云（推荐）</option>
         <option value="github" ${sync.platform==='github'?'selected':''}>GitHub</option>
+        <option value="gitee" ${sync.platform==='gitee'?'selected':''}>Gitee 码云</option>
       </select></div>
-    <div class="setrow"><span>用户名 owner</span><input type="text" data-act="sync-owner" value="${esc(sync.owner||'')}" placeholder="如 whitepaws" style="width:150px"></div>
-    <div class="setrow"><span>仓库 repo</span><input type="text" data-act="sync-repo" value="${esc(sync.repo||'')}" placeholder="如 jingxuan-sync" style="width:150px"></div>
-    <div class="setrow"><span>分支（可空）</span><input type="text" data-act="sync-branch" value="${esc(sync.branch||'')}" placeholder="默认 master/main" style="width:150px"></div>
-    <div class="setrow"><span>文件路径</span><input type="text" data-act="sync-path" value="${esc(sync.path||'jxst3_sync.json')}" style="width:150px"></div>
-    <div class="setrow"><span>令牌 token</span><input type="password" data-act="sync-token" value="${esc(sync.token||'')}" placeholder="仅存本机，可随时吊销" style="width:150px"></div>
+    ${sync.platform === 'nutstore' ? `
+      <div class="setrow"><span>坚果云账号</span><input type="text" data-act="sync-nu-email" value="${esc(sync.nuEmail||'')}" placeholder="登录邮箱" style="width:150px"></div>
+      <div class="setrow"><span>应用密码</span><input type="password" data-act="sync-nu-password" value="${esc(sync.nuPassword||'')}" placeholder="安全选项里生成" style="width:150px"></div>
+      <div class="setrow"><span>Worker 代理</span><input type="text" data-act="sync-nu-proxy" value="${esc(sync.nuProxy||'')}" placeholder="https://xxx.workers.dev" style="width:150px"></div>
+      <div class="setrow"><span>云端路径</span><input type="text" data-act="sync-nu-path" value="${esc(sync.nuPath||'jxst3_tiku/sync.json')}" style="width:150px"></div>
+    ` : `
+      <div class="setrow"><span>用户名 owner</span><input type="text" data-act="sync-owner" value="${esc(sync.owner||'')}" placeholder="如 whitepaws" style="width:150px"></div>
+      <div class="setrow"><span>仓库 repo</span><input type="text" data-act="sync-repo" value="${esc(sync.repo||'')}" placeholder="如 jingxuan-sync" style="width:150px"></div>
+      <div class="setrow"><span>分支（可空）</span><input type="text" data-act="sync-branch" value="${esc(sync.branch||'')}" placeholder="默认 master/main" style="width:150px"></div>
+      <div class="setrow"><span>文件路径</span><input type="text" data-act="sync-path" value="${esc(sync.path||'jxst3_sync.json')}" style="width:150px"></div>
+      <div class="setrow"><span>令牌 token</span><input type="password" data-act="sync-token" value="${esc(sync.token||'')}" placeholder="仅存本机，可随时吊销" style="width:150px"></div>
+    `}
     <div class="setrow"><span>交卷后自动上传</span><label class="switch"><input type="checkbox" data-act="sync-auto" ${sync.autoSync?'checked':''}><i></i></label></div>
     <div class="row" style="flex-wrap:wrap;margin-top:8px">
       <button class="btn btn-primary" data-act="sync-upload">⬆ 上传到云端</button>
-      <button class="btn" data-act="sync-download">⬇ 从云端下载</button></div>
-    <div class="muted" style="margin-top:8px">${sync.lastSyncAt ? '上次同步：' + fmtTime(sync.lastSyncAt) : '尚未同步'} · 令牌仅存在本机浏览器，怀疑泄露可到平台后台删除</div>
-    <details class="fold" style="margin-top:10px"><summary>首次使用：怎么配置云同步？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
-    <b>【Gitee 步骤】</b>① 登录 gitee.com → 右上「+」→「新建仓库」→ 建议勾「私有」→ 记下地址里的<b>用户名/仓库名</b>；② 点头像 →「设置」→「安全设置」→「私人令牌」→「生成新令牌」→ 勾选 <b>projects</b> → 提交后<b>立刻复制</b>（只显示一次）；③ 回到本页：平台选 Gitee，填用户名、仓库名、粘贴令牌，分支留空即可，点「⬆ 上传到云端」。<br>
+      <button class="btn" data-act="sync-download">⬇ 从云端下载</button>
+      <button class="btn" data-act="sync-test">🔍 测试连接</button></div>
+    <div class="muted" style="margin-top:8px">${sync.lastSyncAt ? '上次同步：' + fmtTime(sync.lastSyncAt) : '尚未同步'} · 账号密码仅存在本机浏览器</div>
+    <details class="fold" style="margin-top:10px"><summary>🔧 首次使用：怎么配置坚果云同步？（推荐，国内快）</summary><div class="muted" style="padding-top:8px;line-height:1.8">
+    <b>为什么需要 Worker？</b>坚果云 WebDAV 不允许网页直接跨域访问，需借一个免费小代理转发（Cloudflare Worker）。<br><br>
+    <b>第一步 · 生成坚果云应用密码</b><br>
+    登录 <b>jianguoyun.com</b> → 右上头像 →「账户信息」→ 左侧「安全选项」→ 找到「第三方应用管理 / 添加应用密码」→ 生成一个 → <b>复制那串密码</b>（不是你的登录密码）。<br><br>
+    <b>第二步 · 部署 Cloudflare Worker 代理</b><br>
+    ① 注册 <b>dash.cloudflare.com</b>（免费，不用信用卡）；<br>
+    ② 左侧「Workers & Pages」→「Create」→「Create Worker」→ 起个名字 → 部署；<br>
+    ③ 点「Edit code」，把下面这段全部替换进去后点「Deploy」：<br>
+    <div style="background:#f4f6fb;border-radius:8px;padding:10px;margin:8px 0;font-family:monospace;font-size:11.5px;white-space:pre-wrap;overflow-x:auto">export default {
+  async fetch(request) {
+    const cors = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, PUT, OPTIONS',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type'
+    };
+    if (request.method === 'OPTIONS')
+      return new Response(null, { status: 204, headers: cors });
+    const u = new URL(request.url);
+    const resp = await fetch('https://dav.jianguoyun.com/dav' + u.pathname, {
+      method: request.method,
+      headers: {
+        'Authorization': request.headers.get('Authorization') || '',
+        'Content-Type': request.headers.get('Content-Type') || 'application/json'
+      },
+      body: request.method === 'PUT' ? await request.arrayBuffer() : undefined
+    });
+    const out = new Response(resp.body, resp);
+    Object.entries(cors).forEach(([k, v]) => out.headers.set(k, v));
+    return out;
+  }
+}</div>
+    ④ 部署后复制它给的地址（形如 <code>https://xxx.yyy.workers.dev</code>）。<br><br>
+    <b>第三步 · 回到本页填写</b><br>
+    平台选「坚果云」→ 填登录邮箱、应用密码、Worker 地址 → 云端路径保持 <code>jxst3_tiku/sync.json</code> → 点「🔍 测试连接」确认无误 → 点「⬆ 上传到云端」。<br>
+    <b>换设备</b>：另一台设备填同样的邮箱/应用密码/Worker 地址，点「⬇ 从云端下载」即可。</div></details>
+    <details class="fold"><summary>首次使用：怎么配置 GitHub / Gitee 同步？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     <b>【GitHub 步骤】</b>建仓库后到 Settings → Developer settings → Personal access tokens → Fine-grained tokens → 权限选 <b>Contents: Read and write</b>（可限定单个仓库）→ 生成后粘贴到本页。<br>
-    <b>换设备</b>：在另一台设备填同样的平台/用户名/仓库/令牌，点「⬇ 从云端下载」即可恢复数据。</div></details></div>
+    <b>【Gitee 步骤】</b>登录 gitee.com → 右上「+」→「新建仓库」→ 记下<b>用户名/仓库名</b>；点头像 →「设置」→「安全设置」→「私人令牌」→ 勾选 <b>projects</b> → 生成后<b>立刻复制</b>；回到本页填用户名、仓库名、令牌。<br>
+    <b>换设备</b>：在另一台设备填同样的配置，点「⬇ 从云端下载」即可恢复数据。</div></details></div>
     <div class="card"><h3>❓ 使用说明</h3>
     <details class="fold"><summary>「完整录入」和「快速建卡」有什么区别？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     完整录入：粘贴/PDF 上传含题干选项的文本，刷题时显示粉笔式界面（题干+选项文字）。快速建卡：一键生成<b>北京选调 65 题标准结构</b>（政治理论10 · 常识判断10 · 言语理解10 · 数量关系5 · 图形推理5 · 逻辑判断10 · 科学推理5 · 资料分析10），只填答案即可，作答时大题号+字母涂卡；题量不对可点「改题量」。第二步「批量设置题型」里还有「📋 套用北京选调标准」按钮，可随时把题型重排为标准结构。<b>同一份卷里两者可混用</b>——没录题干的题自动降级为纯字母涂卡。</div></details>
@@ -1378,37 +1466,59 @@ function viewMine(){
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.0 · 粉笔式刷题 + 答题卡 · 支持云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.1 · 粉笔式刷题 + 答题卡 · 支持坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
+// ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
+// 归一化配置（供各流程函数使用）
+function buildSyncCfg(){
+  return {
+    platform: sync.platform,
+    owner: sync.owner, repo: sync.repo, path: sync.path || 'jxst3_sync.json',
+    branch: sync.branch, token: sync.token,
+    nuEmail: sync.nuEmail, nuPassword: sync.nuPassword, nuProxy: sync.nuProxy, nuPath: sync.nuPath
+  };
+}
 function syncReady(){
   const miss = [];
-  if(!String(sync.owner||'').trim()) miss.push('用户名(owner)');
-  if(!String(sync.repo||'').trim()) miss.push('仓库名(repo)');
-  if(!String(sync.token||'').trim()) miss.push('令牌');
+  if(sync.platform === 'nutstore'){
+    if(!String(sync.nuEmail||'').trim()) miss.push('坚果云账号(邮箱)');
+    if(!String(sync.nuPassword||'').trim()) miss.push('应用密码');
+    if(!String(sync.nuProxy||'').trim()) miss.push('Worker 代理地址');
+  } else {
+    if(!String(sync.owner||'').trim()) miss.push('用户名(owner)');
+    if(!String(sync.repo||'').trim()) miss.push('仓库名(repo)');
+    if(!String(sync.token||'').trim()) miss.push('令牌');
+  }
   return { ok: miss.length === 0, miss };
 }
 let syncing = false;
 // 读取云端文件；不存在返回 {exists:false}
 async function syncGetRemote(){
-  const cfg = { owner: sync.owner, repo: sync.repo, path: sync.path || 'jxst3_sync.json', branch: sync.branch, token: sync.token };
+  const cfg = buildSyncCfg();
   const g = syncGetConfig(sync.platform, cfg);
   let res;
   try{ res = await fetch(g.url, { method: 'GET', headers: g.headers }); }
-  catch(e){ throw new Error('网络异常，无法连接云平台（离线或被浏览器拦截）'); }
+  catch(e){ throw new Error('网络异常，无法连接云平台（离线、代理未开或被浏览器拦截）'); }
   if(res.status === 404) return { exists: false };
   if(!res.ok) throw new Error(fmtSyncError(res.status, sync.platform));
-  let got;
-  try{ got = await res.json(); }
-  catch(e){ throw new Error('云端返回了非预期内容，请检查仓库/路径是否正确'); }
-  const dec = decodeRemoteContent(got);
-  let data;
-  try{ data = parseSyncPayload(JSON.parse(dec.text)); }
-  catch(e){ throw new Error('云端文件不是有效备份，已中止以免覆盖本地'); }
-  return { exists: true, sha: dec.sha, data };
+  let text;
+  try{ text = await res.text(); }
+  catch(e){ throw new Error('云端返回了非预期内容，请检查路径是否正确'); }
+  let data, sha = '';
+  try{
+    if(sync.platform === 'nutstore'){
+      data = parseSyncPayload(JSON.parse(text));       // WebDAV 原文即备份 JSON，无 sha 概念
+    } else {
+      const got = JSON.parse(text); const dec = decodeRemoteContent(got);
+      sha = dec.sha || '';                              // GitHub/Gitee 更新时需要比对 sha
+      data = parseSyncPayload(JSON.parse(dec.text));
+    }
+  }catch(e){ throw new Error('云端文件不是有效备份，已中止以免覆盖本地'); }
+  return { exists: true, sha, data };
 }
-// 上传：打包本地 → 写云端（先 GET 取 sha 判断创建/更新）
+// 上传：打包本地 → 写云端
 async function syncUpload(silent){
   if(syncing){ if(!silent) toast('同步进行中，请稍候'); return; }
   const rd = syncReady();
@@ -1416,17 +1526,29 @@ async function syncUpload(silent){
   syncing = true;
   if(!silent) toast('正在上传…');
   try{
-    const cfg = { owner: sync.owner, repo: sync.repo, path: sync.path || 'jxst3_sync.json', branch: sync.branch, token: sync.token };
+    const cfg = buildSyncCfg();
+    const ep = syncEndpoint(sync.platform, cfg);
+    if(sync.platform === 'nutstore'){
+      // WebDAV：直接 PUT 文件原文
+      const text = JSON.stringify(buildSyncPayload(papers, sessions, wrongs, settings), null, 1);
+      const url = nutstoreUrl(cfg, true);
+      let res;
+      try{ res = await fetch(url, { method: 'PUT', headers: nutstoreHeaders(cfg), body: text }); }
+      catch(e){ throw new Error('网络异常，无法连接（离线、Worker 代理未开或被浏览器拦截）'); }
+      if(!res.ok) throw new Error(fmtSyncError(res.status, 'nutstore'));
+      sync.lastSyncAt = Date.now();
+      saveSync();
+      if(!silent) toast('✅ 已上传到坚果云');
+      return true;
+    }
     let remote = { exists: false, sha: '' };
     try{ remote = await syncGetRemote(); }catch(e){ if(!/不是有效备份|非预期内容/.test(e.message)) throw e; }
     const b64 = u8ToBase64(JSON.stringify(buildSyncPayload(papers, sessions, wrongs, settings), null, 1));
-    const ep = syncEndpoint(sync.platform, cfg);
     const isCreate = !remote.exists;
     const method = isCreate ? ep.methodCreate : ep.methodUpdate;
-    const url = (sync.platform === 'github' && !isCreate) ? ep.url : ep.url;
     const body = syncBuildWriteBody(sync.platform, cfg, b64, remote.sha, isCreate);
     let res;
-    try{ res = await fetch(url, { method, headers: syncHeaders(sync.platform, sync.token), body: JSON.stringify(body) }); }
+    try{ res = await fetch(ep.url, { method, headers: syncHeaders(sync.platform, sync.token), body: JSON.stringify(body) }); }
     catch(e){ throw new Error('网络异常，无法连接云平台（离线或被浏览器拦截）'); }
     if(!res.ok) throw new Error(fmtSyncError(res.status, sync.platform));
     sync.lastSyncAt = Date.now();
@@ -1460,6 +1582,42 @@ async function syncDownload(interactive){
     render();
     toast('✅ 已从云端同步到本机');
   }catch(e){ toast('下载失败：' + e.message); }
+  finally{ syncing = false; }
+}
+// 测试连接：只读探测，不改动任何数据
+async function syncTest(){
+  if(syncing){ toast('同步进行中，请稍候'); return; }
+  const rd = syncReady();
+  if(!rd.ok){ toast('请先填写：' + rd.miss.join('、')); return; }
+  syncing = true;
+  toast('正在测试连接…');
+  try{
+    const cfg = buildSyncCfg();
+    const g = syncGetConfig(sync.platform, cfg);
+    let res;
+    try{ res = await fetch(g.url, { method: 'GET', headers: g.headers }); }
+    catch(e){ throw new Error('网络异常，无法连接（离线、Worker 代理未开或被浏览器拦截，也可能是代理未正确转发）'); }
+    if(res.status === 200){
+      const text = await res.text();
+      let ok = false, info = '';
+      try{
+        if(sync.platform === 'nutstore'){
+          const d = parseSyncPayload(JSON.parse(text));
+          ok = true; info = `试卷 ${d.papers.length} 套 · 记录 ${d.sessions.length} 条 · 错题 ${d.wrongs.length} 道`;
+        } else {
+          const got = JSON.parse(text); const dec = decodeRemoteContent(got);
+          const d = parseSyncPayload(JSON.parse(dec.text));
+          ok = true; info = `试卷 ${d.papers.length} 套 · 记录 ${d.sessions.length} 条 · 错题 ${d.wrongs.length} 道`;
+        }
+      }catch(e){ ok = false; }
+      if(ok) toast('✅ 连接成功，云端已有备份（' + info + '）');
+      else   toast('⚠️ 连接成功，但云端文件不是有效备份，可点【上传】覆盖它');
+    } else if(res.status === 404){
+      toast('✅ 连接成功！云端还没有备份文件，点【上传到云端】即可创建');
+    } else {
+      throw new Error(fmtSyncError(res.status, sync.platform));
+    }
+  }catch(e){ toast('❌ 测试失败：' + e.message); }
   finally{ syncing = false; }
 }
 // 自动同步（交卷时调用，静默失败）
@@ -1555,6 +1713,7 @@ document.addEventListener('click', e => {
     case 'export-data': exportData(); break;
     case 'sync-upload': syncUpload(false); break;
     case 'sync-download': syncDownload(true); break;
+    case 'sync-test': syncTest(); break;
     case 'clear-all': if(confirm('确定清空全部数据（试卷/记录/错题）？不可恢复！') && confirm('再次确认：真的要清空吗？')){ papers = []; sessions = []; wrongs = []; settings = { autoNext: true, timeLimit: 150, seenGuide: true }; savePapers(); saveSessions(); saveWrongs(); saveSettings(); render(); toast('已清空'); } break;
     case 'q-del': imp.questions = imp.questions.filter(q => q.id !== el.dataset.qid); render(); break;
     case 'q-add': imp.questions.push({ id: uid('q'), stem: '', options: { A:'',B:'',C:'',D:'' }, answer: '', type: '未分类' }); render(); break;
@@ -1580,6 +1739,10 @@ document.addEventListener('change', e => {
   else if(act === 'sync-branch'){ sync.branch = el.value.trim(); saveSync(); }
   else if(act === 'sync-path'){ sync.path = (el.value.trim() || 'jxst3_sync.json'); saveSync(); }
   else if(act === 'sync-token'){ sync.token = el.value.trim(); saveSync(); }
+  else if(act === 'sync-nu-email'){ sync.nuEmail = el.value.trim(); saveSync(); }
+  else if(act === 'sync-nu-password'){ sync.nuPassword = el.value.trim(); saveSync(); }
+  else if(act === 'sync-nu-proxy'){ sync.nuProxy = el.value.trim(); saveSync(); }
+  else if(act === 'sync-nu-path'){ sync.nuPath = (el.value.trim() || 'jxst3_tiku/sync.json'); saveSync(); }
   else if(act === 'sync-platform'){ sync.platform = el.value; saveSync(); render(); }
   else if(act === 'sync-auto'){ sync.autoSync = el.checked; saveSync(); toast(sync.autoSync ? '已开启交卷后自动上传' : '已关闭自动上传'); }
   if(e.target && e.target.name === 'qmode'){
