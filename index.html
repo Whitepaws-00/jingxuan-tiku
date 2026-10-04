@@ -150,7 +150,7 @@ details.fold summary{cursor:pointer;font-weight:600;font-size:14px}
 <script>
 'use strict';
 /* ============================================================
-   京选刷题 v4.3 · 粉笔式刷题 + 答题卡 双模式
+   京选刷题 v4.4 · 粉笔式刷题 + 答题卡 双模式
    - 完整录入（题干+选项+答案，粘贴文本/PDF 解析）→ 粉笔式单题作答
    - 快速建卡（仅题型+答案）→ 纯字母涂卡（自动降级）
    - 每题计时 · 题型得分率 · 双维度诊断 · 错题本 · 本地离线
@@ -577,6 +577,19 @@ function nutstoreUrl(cfg, forWrite){
 function nutstoreHeaders(cfg){
   return { 'Authorization': nutstoreAuth(cfg.nuEmail, cfg.nuPassword), 'Content-Type': 'application/json' };
 }
+// 从文件路径推出需要逐级创建的父目录 URL 列表（由浅到深）
+// WebDAV 规定：PUT 只能创建文件，祖先目录不存在时返回 409，必须先用 MKCOL 建目录（RFC 2518 §8.7.1）
+// 例：nuPath='a/b/sync.json' → 代理下 ['/a', '/a/b']
+function nutstoreParentPaths(cfg){
+  const proxy = String(cfg.nuProxy || '').trim().replace(/\/+$/, '');
+  const base = proxy || 'https://dav.jianguoyun.com/dav';
+  const segs = String(cfg.nuPath || 'jxst3_tiku/sync.json').trim().replace(/^\/+/, '').split('/').filter(Boolean);
+  const dirs = segs.slice(0, -1);          // 去掉文件名，只留目录层级
+  const out = [];
+  let acc = '';
+  for(const d of dirs){ acc += '/' + encodeURIComponent(d); out.push(base + acc); }
+  return out;
+}
 
 // 平台端点：Gitee 创建用 POST / 更新用 PUT；GitHub 均用 PUT；坚果云 WebDAV 均用 PUT
 function syncEndpoint(platform, cfg){
@@ -644,6 +657,7 @@ function fmtSyncError(status, platform){
       case 401: return '坚果云账号或应用密码错误（密码要用「安全选项」里生成的应用密码，不是登录密码）';
       case 403: return '坚果云拒绝访问，请确认账号已开启 WebDAV 且路径有权限';
       case 404: return '坚果云上还没有这个文件（首次点【上传】即可创建）';
+      case 409: return '坚果云路径冲突：父文件夹不存在或路径上已有同名文件夹。应用会自动创建文件夹，若仍报此错请把「云端路径」改为单层（如 jxst3_sync.json），或先在坚果云网页版建好文件夹';
       case 405: case 501: return '坚果云不支持该操作，请检查 Worker 代理是否正常转发';
       case 507: return '坚果云空间不足，请清理后再试';
       case 429: return '请求过于频繁，请稍后再试';
@@ -1436,7 +1450,7 @@ function viewMine(){
   async fetch(request) {
     const cors = {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, PUT, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, PUT, MKCOL, OPTIONS',
       'Access-Control-Allow-Headers': 'Authorization, Content-Type'
     };
     if (request.method === 'OPTIONS')
@@ -1500,7 +1514,7 @@ function viewMine(){
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.3 · 支持坚果云/GitHub/Gitee 云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.4 · 支持坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
@@ -1557,6 +1571,20 @@ async function syncGetRemote(){
   }
   return { exists: true, sha, data };
 }
+// 坚果云：逐级确保父目录存在（MKCOL）。已存在返回 405，视为成功，忽略。
+async function nutstoreEnsureDirs(cfg){
+  const dirs = nutstoreParentPaths(cfg);
+  for(const url of dirs){
+    let res;
+    try{ res = await fetch(url, { method: 'MKCOL', headers: nutstoreHeaders(cfg) }); }
+    catch(e){ throw new Error('网络异常，无法连接（离线、Worker 代理未开或被浏览器拦截）'); }
+    // 201=新建成功；405=已存在；409=更上层不存在（按顺序建，理论不会）；403=路径非法
+    if(res.ok || res.status === 405 || res.status === 409) continue;
+    if(res.status === 401) throw new Error(fmtSyncError(401, 'nutstore'));
+    if(res.status === 403) throw new Error(fmtSyncError(403, 'nutstore'));
+    throw new Error(fmtSyncError(res.status, 'nutstore'));
+  }
+}
 // 上传：打包本地 → 写云端
 async function syncUpload(silent){
   if(syncing){ if(!silent) toast('同步进行中，请稍候'); return; }
@@ -1568,7 +1596,8 @@ async function syncUpload(silent){
     const cfg = buildSyncCfg();
     const ep = syncEndpoint(sync.platform, cfg);
     if(sync.platform === 'nutstore'){
-      // WebDAV：直接 PUT 文件原文
+      // WebDAV：先逐级建父目录（否则 409），再 PUT 文件原文
+      await nutstoreEnsureDirs(cfg);
       const text = JSON.stringify(buildSyncPayload(papers, sessions, wrongs, settings), null, 1);
       const url = nutstoreUrl(cfg, true);
       let res;
