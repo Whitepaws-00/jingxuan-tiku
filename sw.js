@@ -1,5 +1,5 @@
 // 京选刷题 Service Worker：离线缓存（安装为 APP 后无网可用）
-const CACHE = 'jxst-v1';
+const CACHE = 'jxst-v2';
 const CORE = [
   './',
   './index.html',
