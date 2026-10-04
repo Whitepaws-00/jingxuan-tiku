@@ -124,6 +124,7 @@ table.stats td{padding:8px 4px;border-bottom:1px solid #f2f4f9}
 .badge.no{background:var(--red)}
 .badge.skip{background:#c3cad8}
 .diag{border-left:4px solid var(--orange);background:#fff9ee;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:13.5px}
+.wechat-warn{margin:10px 14px 0;padding:10px 12px;border-left:4px solid var(--orange);background:#fff9ee;border-radius:8px;font-size:13px;line-height:1.7}
 .diag.blue{border-color:var(--blue);background:var(--blue2)}
 .diag.red{border-color:var(--red);background:#fdf0f0}
 details.fold{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fff;margin-bottom:10px}
@@ -406,6 +407,62 @@ function buildStats(session, questions){
     return { type: k, scorable: st.length, correct: sc, rate: st.length ? sc / st.length : 0, avgTime: t.ansN ? t.time / t.ansN : 0, total: perQ.filter(r => r.type === k).length };
   });
   return { perQ, types, totalQ, answered, correct, scoreRate, avgTime, totalTime };
+}
+function mdCell(t){ return String(t == null ? '' : t).replace(/\|/g, '｜').replace(/\r?\n/g, ' '); }
+function buildReportMD(s, qs, st){
+  const L = [];
+  L.push(`# 刷题报告 · ${s.paperName}`);
+  L.push('');
+  L.push(`- **模式**：${s.mode === 'special' ? '专项练习（' + ((s.types||[]).join('、') || '未选题型') + '）' : '整卷模拟'}`);
+  L.push(`- **时间**：${fmtTime(s.startedAt)} ~ ${fmtTime(s.finishedAt)}`);
+  L.push(`- **得分率**：${st.totalQ ? Math.round(st.scoreRate * 100) + '%' : '--'}（答对 ${st.correct} / 计分题 ${st.totalQ}，实际作答 ${st.answered} 题）`);
+  L.push(`- **用时**：共 ${fmtSec(st.totalTime)}，平均每题 ${fmtSec(st.avgTime)}`);
+  L.push('');
+  L.push('## 一、题型统计');
+  L.push('');
+  L.push('| 题型 | 计分题 | 答对 | 得分率 | 平均用时 |');
+  L.push('|---|---|---|---|---|');
+  st.types.forEach(t => L.push(`| ${mdCell(t.type)} | ${t.scorable} | ${t.correct} | ${Math.round(t.rate * 100)}% | ${fmtSec(t.avgTime)} |`));
+  L.push('');
+  L.push('## 二、诊断建议');
+  L.push('');
+  const lowAcc = st.types.filter(t => t.scorable > 0 && t.rate < 0.6);
+  if(lowAcc.length) L.push(`- 🎯 **需提高准确率**：${lowAcc.map(t => `${t.type}（${Math.round(t.rate*100)}%）`).join('、')}——建议专项回炉`);
+  const slow = st.types.filter(t => t.avgTime > st.avgTime * 1.2 && t.avgTime > 0);
+  if(slow.length) L.push(`- 🐌 **需提高做题速度**：${slow.map(t => `${t.type} ${fmtSec(t.avgTime)}/题（全卷均值 ${fmtSec(st.avgTime)}）`).join('、')}`);
+  const fastOk = st.types.filter(t => t.scorable > 0 && t.rate >= 0.8 && t.avgTime <= st.avgTime);
+  if(fastOk.length) L.push(`- ✅ **状态良好**：${fastOk.map(t => t.type).join('、')}——保持手感即可`);
+  if(!st.answered) L.push('- 本次没有作答记录');
+  L.push('');
+  L.push('## 三、逐题明细');
+  L.push('');
+  L.push('| # | 题型 | 结果 | 你的答案 | 正确答案 | 用时 | 标记 |');
+  L.push('|---|---|---|---|---|---|---|');
+  st.perQ.forEach(r => {
+    L.push(`| ${r.num} | ${mdCell(r.type)} | ${r.skipped ? '跳过' : (r.correct ? '✓' : '✗')} | ${r.skipped ? '—' : (r.choice || '未涂')} | ${r.answer || '未设'} | ${r.skipped ? '—' : fmtSec(r.time)} | ${r.marked ? '🚩' : ''} |`);
+  });
+  const wrongRows = st.perQ.filter(r => !r.skipped && !r.correct && r.answer);
+  if(wrongRows.length){
+    L.push('');
+    L.push(`## 四、错题回顾（${wrongRows.length} 题）`);
+    wrongRows.forEach(r => {
+      const q = qs.find(x => x.id === r.qid); if(!q) return;
+      L.push('');
+      L.push(`### 第 ${r.num} 题 · ${r.type}`);
+      if(q.stem){ L.push(''); L.push(q.stem); }
+      const keys = Object.keys(q.options || {}).sort();
+      if(keys.some(k => q.options[k])){
+        L.push('');
+        keys.forEach(k => { if(q.options[k]) L.push(`- ${k}. ${q.options[k]}`); });
+      }
+      L.push('');
+      L.push(`> 你的答案：${r.choice || '未涂'} ｜ 正确答案：**${r.answer}** ｜ 用时 ${fmtSec(r.time)}`);
+    });
+  }
+  L.push('');
+  L.push('---');
+  L.push(`*由「京选刷题」导出于 ${fmtTime(Date.now())}*`);
+  return L.join('\n');
 }
 //CORE>>>
 
@@ -767,6 +824,12 @@ function viewQuizTab(){
 }
 function beginQuiz(pid){
   const p = papers.find(x => x.id === pid); if(!p) return;
+  // 防误开新卷：该试卷已有进行中的练习时，先询问是否续做
+  const ongoing = sessions.find(s => s.paperId === pid && s.status === 'ongoing');
+  if(ongoing){
+    if(confirm(`该试卷有一套进行中的练习（已答 ${Object.keys(ongoing.answers).length} 题）。\n\n点「确定」→ 继续上次进度\n点「取消」→ 放弃旧的，重新开始一套`)){ enterQuiz(ongoing.id); return; }
+    sessions = sessions.filter(x => x.id !== ongoing.id); saveSessions();
+  }
   const modeEl = document.querySelector('input[name=qmode]:checked');
   const mode = modeEl ? modeEl.value : 'full';
   let questions = p.questions.slice();
@@ -780,7 +843,7 @@ function beginQuiz(pid){
   const lim = +($('#timeLimitInput') ? $('#timeLimitInput').value : 0) || 0;
   settings.autoNext = !!(document.querySelector('#autoNextInput') && document.querySelector('#autoNextInput').checked);
   if(lim) settings.timeLimit = lim; saveSettings();
-  const s = { id: uid('s'), paperId: p.id, paperName: p.name, mode, types, timeLimit: lim ? lim * 60 : null, startedAt: Date.now(), finishedAt: null, answers: {}, status: 'ongoing', qids: questions.map(q => q.id) };
+  const s = { id: uid('s'), paperId: p.id, paperName: p.name, mode, types, timeLimit: lim ? lim * 60 : null, startedAt: Date.now(), finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: questions.map(q => q.id) };
   sessions.push(s); saveSessions();
   state.quizConfigPid = null;
   enterQuiz(s.id);
@@ -789,7 +852,8 @@ function enterQuiz(sid){
   const s = sessions.find(x => x.id === sid); if(!s) return;
   const p = papers.find(x => x.id === s.paperId);
   if(!p){ toast('试卷已被删除，无法继续'); sessions = sessions.filter(x => x.id !== sid); saveSessions(); render(); return; }
-  let pos = s.qids.findIndex(qid => !s.answers[qid]);
+  // 恢复进度：优先回到离开时的题号（pos 已持久化），否则找第一道未答题
+  let pos = (typeof s.pos === 'number' && s.pos >= 0 && s.pos < s.qids.length) ? s.pos : s.qids.findIndex(qid => !s.answers[qid]);
   if(pos === -1) pos = 0;
   state.quizView = true; state.tab = 'quiz'; state.sheetOpen = false;
   state.quiz = { sessionId: sid, pos, shownAt: Date.now() };
@@ -813,19 +877,21 @@ function pick(key){
   if(settings.autoNext) nextQ(); else render();
 }
 function nextQ(){
-  const q = state.quiz;
+  const q = state.quiz, s = currentSession();
   if(q.pos + 1 >= q_total()){ if(confirm('已经是最后一题，交卷吗？')) finishQuiz(); else render(); return; }
-  q.pos++; q.shownAt = Date.now(); render();
+  q.pos++; q.shownAt = Date.now();
+  if(s){ s.pos = q.pos; saveSessions(); }
+  render();
 }
 function q_total(){ const s = currentSession(); return s ? s.qids.length : 0; }
 function prevQ(){
   const q = state.quiz, s = currentSession();
-  if(q.pos > 0){ q.pos--; const id = s.qids[q.pos]; if(!s.answers[id]) q.shownAt = Date.now(); render(); }
+  if(q.pos > 0){ q.pos--; const id = s.qids[q.pos]; if(!s.answers[id]) q.shownAt = Date.now(); s.pos = q.pos; saveSessions(); render(); }
 }
 function jumpToQ(qid){
   const s = currentSession();
   const pos = s.qids.indexOf(qid);
-  if(pos > -1){ state.quiz.pos = pos; if(!s.answers[qid]) state.quiz.shownAt = Date.now(); state.sheetOpen = false; render(); }
+  if(pos > -1){ state.quiz.pos = pos; s.pos = pos; if(!s.answers[qid]) state.quiz.shownAt = Date.now(); state.sheetOpen = false; saveSessions(); render(); }
 }
 function toggleMark(){
   const s = currentSession();
@@ -863,6 +929,7 @@ function viewQuizRun(){
   const answeredN = s.qids.filter(id => s.answers[id]).length;
   const remain = s.timeLimit ? s.timeLimit - (Date.now() - s.startedAt) / 1000 : null;
   const a = s.answers[question.id];
+  const wechat = /MicroMessenger|QQ\//i.test(navigator.userAgent);
   const marked = a && a.marked;
   const keys = Object.keys(question.options || {}).sort();
   if(!keys.length){ LETTERS.slice(0,4).forEach(k => question.options[k] = question.options[k] || ''); }
@@ -903,6 +970,7 @@ function viewQuizRun(){
       <span>${q.pos + 1}/${cur.total} · 已答${answeredN}</span>
       <button class="btn btn-primary btn-sm" data-act="quiz-finish">交卷</button></div>
       <div class="progress"><i style="width:${Math.round(answeredN / cur.total * 100)}%"></i></div></div>
+    ${wechat ? '<div class="wechat-warn">⚠️ 检测到微信/QQ 内置浏览器：这类环境刷新或退出后<b>可能清空本地记录</b>。进度虽已即时保存，仍建议点右上角「···」→「在浏览器打开」，用系统浏览器做题更稳。</div>' : ''}
     <div class="q-body">${body}</div>
     <div class="quiz-foot">
       <button class="btn btn-sm" data-act="sheet-open">🗂 答题卡</button>
@@ -984,7 +1052,8 @@ function viewReportDetail(){
   });
   html += `</div>`;
   const wrongIds = st.perQ.filter(r => !r.skipped && !r.correct && r.answer).map(r => r.qid);
-  if(wrongIds.length) html += `<button class="btn btn-green btn-block" data-act="redo-wrong-from-report" data-ids="${wrongIds.join(',')}">⭐ 立即重做本次错题（${wrongIds.length} 题）</button><div style="height:20px"></div>`;
+  if(wrongIds.length) html += `<button class="btn btn-green btn-block" data-act="redo-wrong-from-report" data-ids="${wrongIds.join(',')}">⭐ 立即重做本次错题（${wrongIds.length} 题）</button><div style="height:10px"></div>`;
+  html += `<button class="btn btn-block" data-act="export-report-md">📄 导出报告为 Markdown（.md）</button><div style="height:20px"></div>`;
   return html;
 }
 
@@ -1091,7 +1160,7 @@ function viewMine(){
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v3.6 · 粉笔式刷题 + 答题卡 · 纯本地离线</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v3.7 · 粉笔式刷题 + 答题卡 · 纯本地离线</div>`;
 }
 function exportData(){
   const data = JSON.stringify({ app: '京选刷题', version: 3, exportedAt: Date.now(), papers, sessions, wrongs, settings }, null, 1);
@@ -1101,6 +1170,19 @@ function exportData(){
   a.download = '京选刷题备份_' + new Date().toISOString().slice(0, 10) + '.json';
   document.body.appendChild(a); a.click(); a.remove();
   toast('备份已导出');
+}
+function exportReportMD(){
+  const s = sessions.find(x => x.id === state.reportOpenId); if(!s) return;
+  const p = papers.find(x => x.id === s.paperId);
+  const qs = p ? s.qids.map(id => p.questions.find(q => q.id === id)).filter(Boolean) : [];
+  const st = buildStats(s, qs);
+  const md = buildReportMD(s, qs, st);
+  const blob = new Blob(['\ufeff' + md], { type: 'text/markdown;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `刷题报告_${s.paperName.replace(/[\\\/:*?"<>|]/g, '')}_${new Date().toISOString().slice(0, 10)}.md`;
+  document.body.appendChild(a); a.click(); a.remove();
+  toast('报告已导出为 .md 文件');
 }
 function importData(file){
   const reader = new FileReader();
@@ -1178,6 +1260,7 @@ document.addEventListener('click', e => {
     case 'wrong-pick': wrongPick(el.dataset.key); break;
     case 'wrong-redo-exit': state.wrongRedo = null; state.tab = 'wrong'; render(); break;
     case 'export-data': exportData(); break;
+    case 'export-report-md': exportReportMD(); break;
     case 'clear-all': if(confirm('确定清空全部数据（试卷/记录/错题）？不可恢复！') && confirm('再次确认：真的要清空吗？')){ papers = []; sessions = []; wrongs = []; settings = { autoNext: true, timeLimit: 150, seenGuide: true }; savePapers(); saveSessions(); saveWrongs(); saveSettings(); render(); toast('已清空'); } break;
     case 'q-del': imp.questions = imp.questions.filter(q => q.id !== el.dataset.qid); render(); break;
     case 'q-add': imp.questions.push({ id: uid('q'), stem: '', options: { A:'',B:'',C:'',D:'' }, answer: '', type: '未分类' }); render(); break;
@@ -1209,6 +1292,13 @@ document.addEventListener('change', e => {
 });
 setInterval(quizTick, 1000);
 render();
+
+// ---------- 页面离开兜底保存（移动端切后台/锁屏/刷新防丢进度） ----------
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden){ try{ saveSessions(); saveWrongs(); savePapers(); saveSettings(); }catch(e){} }
+});
+window.addEventListener('beforeunload', () => { try{ saveSessions(); saveWrongs(); }catch(e){} });
+window.addEventListener('pagehide', () => { try{ saveSessions(); saveWrongs(); }catch(e){} });
 
 // ---------- 添加到主屏幕引导（APP化使用） ----------
 (function pwaTip(){
