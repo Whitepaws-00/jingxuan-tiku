@@ -150,7 +150,7 @@ details.fold summary{cursor:pointer;font-weight:600;font-size:14px}
 <script>
 'use strict';
 /* ============================================================
-   京选刷题 v4.1 · 粉笔式刷题 + 答题卡 双模式
+   京选刷题 v4.2 · 粉笔式刷题 + 答题卡 双模式
    - 完整录入（题干+选项+答案，粘贴文本/PDF 解析）→ 粉笔式单题作答
    - 快速建卡（仅题型+答案）→ 纯字母涂卡（自动降级）
    - 每题计时 · 题型得分率 · 双维度诊断 · 错题本 · 本地离线
@@ -621,8 +621,17 @@ function syncBuildWriteBody(platform, cfg, b64, sha, isCreate){
 }
 // 从 GET 响应提取内容与 sha
 function decodeRemoteContent(got){
-  if(!got || typeof got.content !== 'string') throw new Error('云端返回内容异常');
+  if(!got || typeof got.content !== 'string') throw new Error('云端返回内容异常（可能路径指向了目录，或 Gitee/GitHub 返回结构有变）');
   return { text: base64ToU8(got.content), sha: got.sha || '' };
+}
+// 判定「云端实际没有文件」：Gitee 在文件不存在时返回 HTTP 200 + 空数组 []（而非 404），
+// GitHub 目录为空也可能是 []。统一识别，避免把「没有文件」误当成「内容异常」。
+function isEmptyRemoteContent(got){
+  if(got == null) return true;
+  if(Array.isArray(got)) return got.length === 0;
+  if(typeof got === 'object' && typeof got.content !== 'string') return true;   // 无 content 字段
+  if(typeof got.content === 'string' && got.content.trim() === '') return true; // content 为空串
+  return false;
 }
 function syncCommitMessage(ts){
   const d = new Date(ts || Date.now()), p = n => String(n).padStart(2, '0');
@@ -1466,7 +1475,7 @@ function viewMine(){
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.1 · 粉笔式刷题 + 答题卡 · 支持坚果云/GitHub/Gitee 云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.2 · 支持坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
@@ -1511,11 +1520,16 @@ async function syncGetRemote(){
     if(sync.platform === 'nutstore'){
       data = parseSyncPayload(JSON.parse(text));       // WebDAV 原文即备份 JSON，无 sha 概念
     } else {
-      const got = JSON.parse(text); const dec = decodeRemoteContent(got);
+      const got = JSON.parse(text);
+      if(isEmptyRemoteContent(got)) return { exists: false };   // Gitee 文件不存在时返回 200 + []，按「无备份」处理
+      const dec = decodeRemoteContent(got);
       sha = dec.sha || '';                              // GitHub/Gitee 更新时需要比对 sha
       data = parseSyncPayload(JSON.parse(dec.text));
     }
-  }catch(e){ throw new Error('云端文件不是有效备份，已中止以免覆盖本地'); }
+  }catch(e){
+    if(e && /不是有效备份/.test(e.message)) throw e;   // 备份损坏：原样抛出，提示用户
+    throw new Error('云端文件不是有效备份，已中止以免覆盖本地');
+  }
   return { exists: true, sha, data };
 }
 // 上传：打包本地 → 写云端
@@ -1542,7 +1556,7 @@ async function syncUpload(silent){
       return true;
     }
     let remote = { exists: false, sha: '' };
-    try{ remote = await syncGetRemote(); }catch(e){ if(!/不是有效备份|非预期内容/.test(e.message)) throw e; }
+    try{ remote = await syncGetRemote(); }catch(e){ if(!/不是有效备份|非预期内容|内容异常/.test(e.message)) throw e; }
     const b64 = u8ToBase64(JSON.stringify(buildSyncPayload(papers, sessions, wrongs, settings), null, 1));
     const isCreate = !remote.exists;
     const method = isCreate ? ep.methodCreate : ep.methodUpdate;
@@ -1599,6 +1613,12 @@ async function syncTest(){
     catch(e){ throw new Error('网络异常，无法连接（离线、Worker 代理未开或被浏览器拦截，也可能是代理未正确转发）'); }
     if(res.status === 200){
       const text = await res.text();
+      // 先判「实际没有文件」：Gitee 不存在时返回 200 + []，GitHub 目录为空也可能是 []
+      let empty = false;
+      if(sync.platform !== 'nutstore'){
+        try{ empty = isEmptyRemoteContent(JSON.parse(text)); }catch(e){ empty = false; }
+      }
+      if(empty){ toast('✅ 连接成功！云端还没有备份文件，点【上传到云端】即可创建'); return; }
       let ok = false, info = '';
       try{
         if(sync.platform === 'nutstore'){
