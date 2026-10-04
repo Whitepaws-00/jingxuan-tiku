@@ -150,7 +150,7 @@ details.fold summary{cursor:pointer;font-weight:600;font-size:14px}
 <script>
 'use strict';
 /* ============================================================
-   京选刷题 v4.5 · 粉笔式刷题 + 答题卡 双模式
+   京选刷题 v4.6 · 粉笔式刷题 + 答题卡 双模式
    - 完整录入（题干+选项+答案，粘贴文本/PDF 解析）→ 粉笔式单题作答
    - 快速建卡（仅题型+答案）→ 纯字母涂卡（自动降级）
    - 每题计时 · 题型得分率 · 双维度诊断 · 错题本 · 本地离线
@@ -676,6 +676,31 @@ function fmtSyncError(status, platform){
   }
 }
 
+// ===== 每题计时（未答题也能累计）=====
+// 设计：session.qtimes = { [qid]: 已累计秒数 }，只记录「尚未作答」的题在来回切换间累计的时间。
+// 作答瞬间把累计值 + 本次停留一起写进 answers[qid].time，并从 qtimes 移除。
+// 这样「跳过再回来」不会归零，而是接着之前的时间继续走。
+function qtimesGet(s, qid){
+  if(!s || !s.qtimes) return 0;
+  const v = s.qtimes[qid];
+  return (typeof v === 'number' && v > 0) ? v : 0;
+}
+// 结算：把某题从 shownAt 到现在的一段停留时间累加进 qtimes（仅未作答的题）
+function qtAccrue(s, qid, shownAt, now){
+  if(!s || !qid || s.answers[qid]) return 0;    // 已作答的题不再累计
+  const dt = Math.max(0, (now - shownAt) / 1000);
+  if(dt <= 0) return qtimesGet(s, qid);
+  if(!s.qtimes) s.qtimes = {};
+  s.qtimes[qid] = Math.round((qtimesGet(s, qid) + dt) * 10) / 10;
+  return s.qtimes[qid];
+}
+// 计算某题当前应显示的秒数：已答→记录值；未答→累计值 + 本次停留
+function qTimeDisplay(s, qid, shownAt, now){
+  const a = s && s.answers ? s.answers[qid] : null;
+  if(a && typeof a.time === 'number') return a.time;
+  return qtimesGet(s, qid) + Math.max(0, (now - shownAt) / 1000);
+}
+
 //CORE>>>
 
 // ---------- PDF 解析 ----------
@@ -1097,15 +1122,17 @@ function pick(key){
     render();
     return;
   }
-  // 首次作答：记录用时；默认自动跳下一题
-  const t = Math.max(1, Math.round((Date.now() - q.shownAt) / 1000));
+  // 首次作答：用时 = 该题之前累计的时间（来回切换过的）+ 本次停留
+  const t = Math.max(1, Math.round(qTimeDisplay(s, qid, q.shownAt, Date.now())));
   s.answers[qid] = { choice: key, correct: key === cur.question.answer, time: t };
+  if(s.qtimes) delete s.qtimes[qid];     // 已结算进 answers，清掉临时累计
   saveSessions();
   if(settings.autoNext) nextQ(); else render();
 }
 function nextQ(){
   const q = state.quiz, s = currentSession();
   if(q.pos + 1 >= q_total()){ if(confirm('已经是最后一题，交卷吗？')) finishQuiz(); else render(); return; }
+  if(s) qtAccrue(s, s.qids[q.pos], q.shownAt, Date.now());   // 结算离开前这题的停留
   q.pos++; q.shownAt = Date.now();
   if(s){ s.pos = q.pos; saveSessions(); }
   render();
@@ -1113,12 +1140,20 @@ function nextQ(){
 function q_total(){ const s = currentSession(); return s ? s.qids.length : 0; }
 function prevQ(){
   const q = state.quiz, s = currentSession();
-  if(q.pos > 0){ q.pos--; const id = s.qids[q.pos]; if(!s.answers[id]) q.shownAt = Date.now(); s.pos = q.pos; saveSessions(); render(); }
+  if(q.pos > 0){
+    if(s) qtAccrue(s, s.qids[q.pos], q.shownAt, Date.now()); // 结算当前题
+    q.pos--; s.pos = q.pos; q.shownAt = Date.now();          // 回到上一题，本次停留从 0 计
+    saveSessions(); render();
+  }
 }
 function jumpToQ(qid){
   const s = currentSession();
   const pos = s.qids.indexOf(qid);
-  if(pos > -1){ state.quiz.pos = pos; s.pos = pos; if(!s.answers[qid]) state.quiz.shownAt = Date.now(); state.sheetOpen = false; saveSessions(); render(); }
+  if(pos > -1){
+    qtAccrue(s, s.qids[state.quiz.pos], state.quiz.shownAt, Date.now());  // 结算离开前那题
+    state.quiz.pos = pos; s.pos = pos; state.quiz.shownAt = Date.now();
+    state.sheetOpen = false; saveSessions(); render();
+  }
 }
 function toggleMark(){
   const s = currentSession();
@@ -1129,6 +1164,8 @@ function toggleMark(){
 function saveQuiz(){
   const s = currentSession();
   if(!s){ state.quizView = false; state.quiz = null; state.tab = 'quiz'; render(); return; }
+  // 离开前先结算当前这题的停留时间，下次回来接着算，不丢
+  if(state.quiz) qtAccrue(s, s.qids[state.quiz.pos], state.quiz.shownAt, Date.now());
   s.pos = state.quiz ? state.quiz.pos : (s.pos || 0);      // 记录当前题号，便于下次续做
   saveSessions();
   const answeredN = s.qids.filter(id => s.answers[id]).length;
@@ -1172,8 +1209,8 @@ function viewQuizRun(){
   const keys = Object.keys(question.options || {}).sort();
   if(!keys.length){ LETTERS.slice(0,4).forEach(k => question.options[k] = question.options[k] || ''); }
   const rich = hasContent(question);
-  // 本题用时：统一用 mm:ss 格式；已答过取记录用时，未答则实时走动
-  const qTimeText = fmtClock(a ? (a.time || 0) : (Date.now() - q.shownAt) / 1000);
+  // 本题用时：已答→交卷时的记录值；未答→之前累计 + 本次停留（来回切换不归零）
+  const qTimeText = fmtClock(qTimeDisplay(s, question.id, q.shownAt, Date.now()));
   const qTimeRow = `<div class="q-time" id="qTime">⏱ 本题用时 <b>${qTimeText}</b>${a ? '' : '<span class="muted" id="qTimeLive"></span>'}</div>`;
   let body = '';
   if(rich){
@@ -1241,11 +1278,11 @@ function quizTick(){
       if(elapsed >= s.timeLimit){ toast('时间到，自动交卷'); finishQuiz(); return; }
     }
   }
-  // 本题用时（未作答时实时走动）
+  // 本题用时（未作答时实时走动，含之前来回切换累计的时间）
   const cur = curInfo();
   const qel = $('#qTime');
   if(cur && qel && !s.answers[cur.question.id]){
-    qel.innerHTML = '⏱ 本题用时 <b>' + fmtClock((Date.now() - state.quiz.shownAt) / 1000) + '</b>';
+    qel.innerHTML = '⏱ 本题用时 <b>' + fmtClock(qTimeDisplay(s, cur.question.id, state.quiz.shownAt, Date.now())) + '</b>';
   }
 }
 
@@ -1501,7 +1538,7 @@ function viewMine(){
     <details class="fold"><summary>文本怎么粘识别率最高？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     保持「1. 题干」换行「A. 选项」结构，末尾附答案（如"参考答案：1-5 BADCB"或"1.B 2.D"）。行内多选项（A.xx B.xx 全角空格分隔）、选项跨行都能识别。个别解析错误的题在第二步校对编辑器里改一下即可。</div></details>
     <details class="fold"><summary>每题用时怎么算的？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
-    顶部显示<b>已用时间（正计时）</b>，从开始答题累计；若设了限时，右侧附「/ 限时 mm:ss」作参考，到点自动交卷。<b>每题下方还有一行「本题用时」</b>：未作答时实时走动，点下选项即停表记为本题用时。切到某题开始计时，作答后自动跳下一题（可关闭）。跳过的题不计时；<b>回看已答题可反复改选</b>（改选不重复计时、不自动跳题）；点底部「答题卡」可打开网格总览跳题。<b>最终成绩以交卷时的最后一次选择为准。</b></div></details>
+    顶部显示<b>已用时间（正计时）</b>，从开始答题累计；若设了限时，右侧附「/ 限时 mm:ss」作参考，到点自动交卷。<b>每题下方还有一行「本题用时」</b>：未作答时实时走动，点下选项即停表记为本题用时。<b>跳过某题后再返回，用时从之前累计的时间接着走，不会归零</b>（来回切换的时间会累加）；切到某题开始计时，作答后自动跳下一题（可关闭）。<b>回看已答题可反复改选</b>（改选不重复计时、不自动跳题，且该题用时保持首次作答的记录值）；点底部「答题卡」可打开网格总览跳题。<b>最终成绩以交卷时的最后一次选择为准。</b></div></details>
     <details class="fold"><summary>报告能导出吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     能。打开「报告」里任意一条记录，底部有 <b>📄 导出报告为 Markdown（.md）</b>，一键下载含总览、题型统计、诊断建议、逐题明细、错题回顾的 Markdown 文件，可直接传电脑/进笔记软件/交给 AI 分析；旁边还有「导出原始数据(.json)」给进阶用途。文件默认下载到浏览器下载目录。</div></details>
     <details class="fold"><summary>答题中途能保存退出吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
@@ -1514,7 +1551,7 @@ function viewMine(){
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.5 · 支持坚果云/GitHub/Gitee 云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.6 · 支持坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
