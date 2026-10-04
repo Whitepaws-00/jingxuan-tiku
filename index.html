@@ -1091,7 +1091,7 @@ function viewMine(){
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v3.5 · 粉笔式刷题 + 答题卡 · 纯本地离线</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v3.6 · 粉笔式刷题 + 答题卡 · 纯本地离线</div>`;
 }
 function exportData(){
   const data = JSON.stringify({ app: '京选刷题', version: 3, exportedAt: Date.now(), papers, sessions, wrongs, settings }, null, 1);
@@ -1212,6 +1212,10 @@ render();
 
 // ---------- 添加到主屏幕引导（APP化使用） ----------
 (function pwaTip(){
+  // Service Worker：https 同源环境下注册，离线可用（file:// 打开时静默跳过）
+  if('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')){
+    window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
+  }
   const standalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
   if(standalone) return;
   const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
