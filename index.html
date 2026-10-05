@@ -426,7 +426,7 @@ function reportToMarkdown(s, qs, st){
   L.push(`# 京选刷题 · 成绩报告\n`);
   L.push(`> **试卷**：${s.paperName}  `);
   L.push(`> **模式**：${s.mode === 'special' ? '专项练习（' + (s.types || []).join('、') + '）' : '整卷'}  `);
-  L.push(`> **作答时间**：${fmtTime(s.startedAt)} ~ ${fmtTime(s.finishedAt)}  `);
+  L.push(`> **作答时间**：${fmtTime(s.firstStartedAt || s.startedAt)} ~ ${fmtTime(s.finishedAt)}  `);
   L.push(`> **导出时间**：${fmtTime(Date.now())}\n`);
   L.push(`## 一、总览\n`);
   L.push(`| 指标 | 数值 |`);
@@ -687,6 +687,17 @@ function fmtSyncError(status, platform){
 // - 离开某题时结算：把 shownAt→now 这段累加进 qtimes[qid]
 // - 显示某题用时：qtimes[qid] + 本次停留（若正停留该题）
 // - 作答/改选都不影响计时，时间照常累计（回看、犹豫都算）
+//
+// 顶部「已用时间」同理跨多次进入累计：session.baseElapsed 记录**之前几次进出已累计的秒数**，
+// 当前这一次用 (now - startedAt)。「交卷后重开」与「答题中保存后继续」走的是同一套算法，
+// 计时都从上次的用时上接着累加，永不归零；差别只在交卷会判分、重开再交卷会覆盖旧判分。
+function totalElapsed(s, now){
+  if(!s) return 0;
+  const base = (typeof s.baseElapsed === 'number' && s.baseElapsed > 0) ? s.baseElapsed : 0;
+  const t = (typeof now === 'number') ? now : Date.now();
+  const cur = s.startedAt ? Math.max(0, (t - s.startedAt) / 1000) : 0;
+  return base + cur;
+}
 // 取某题历史累计用时的基础值：
 // - 新版优先用 qtimes[qid]
 // - 旧版数据没有 qtimes 时，回退到 answers[qid].time（避免重开旧卷时历史用时丢失/归零）
@@ -1102,7 +1113,7 @@ function beginQuiz(pid){
   const lim = +($('#timeLimitInput') ? $('#timeLimitInput').value : 0) || 0;
   settings.autoNext = !!(document.querySelector('#autoNextInput') && document.querySelector('#autoNextInput').checked);
   if(lim) settings.timeLimit = lim; saveSettings();
-  const s = { id: uid('s'), paperId: p.id, paperName: p.name, mode, types, timeLimit: lim ? lim * 60 : null, startedAt: Date.now(), finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: questions.map(q => q.id) };
+  const s = { id: uid('s'), paperId: p.id, paperName: p.name, mode, types, timeLimit: lim ? lim * 60 : null, startedAt: Date.now(), firstStartedAt: Date.now(), baseElapsed: 0, finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: questions.map(q => q.id) };
   sessions.push(s); saveSessions();
   state.quizConfigPid = null;
   enterQuiz(s.id);
@@ -1111,11 +1122,16 @@ function enterQuiz(sid){
   const s = sessions.find(x => x.id === sid); if(!s) return;
   const p = papers.find(x => x.id === s.paperId);
   if(!p){ toast('试卷已被删除，无法继续'); sessions = sessions.filter(x => x.id !== sid); saveSessions(); render(); return; }
+  // 旧数据兼容：补齐计时相关字段，保证「保存→继续」与「交卷→重开」同一套累计算法
+  if(typeof s.baseElapsed !== 'number') s.baseElapsed = 0;
+  if(!s.firstStartedAt) s.firstStartedAt = s.startedAt || Date.now();
+  if(!s.startedAt) s.startedAt = Date.now();
   // 恢复进度：优先回到离开时的题号（pos 已持久化），否则找第一道未答题
   let pos = (typeof s.pos === 'number' && s.pos >= 0 && s.pos < s.qids.length) ? s.pos : s.qids.findIndex(qid => !s.answers[qid]);
   if(pos === -1) pos = 0;
   state.quizView = true; state.tab = 'quiz'; state.sheetOpen = false;
   state.quiz = { sessionId: sid, pos, shownAt: Date.now() };
+  saveSessions();
   render();
   const answeredN = s.qids.filter(id => s.answers[id]).length;
   if(answeredN) toast(`已恢复进度，从第 ${pos + 1} 题继续（已答 ${answeredN}/${s.qids.length}）`);
@@ -1134,10 +1150,12 @@ function resumeDoneSession(sid){
     `点「取消」→ 保留原记录，另起一套全新的重新做`;
   if(confirm(msg)){
     // ① 重开原卷：状态回到 ongoing，清掉交卷时间与报告入口，保留作答与每题用时
+    // 计时口径与「答题中保存后继续」完全一致：顶部总用时从上次累计接着走，绝不归零。
+    // 做法：把上一次这一轮的时长（finishedAt - startedAt）并入 baseElapsed，再把 startedAt 归到现在。
+    const prevSitting = (s.startedAt && s.finishedAt && s.finishedAt > s.startedAt) ? (s.finishedAt - s.startedAt) / 1000 : 0;
+    s.baseElapsed = Math.round(((typeof s.baseElapsed === 'number' && s.baseElapsed > 0 ? s.baseElapsed : 0) + prevSitting) * 10) / 10;
     s.status = 'ongoing'; s.finishedAt = null;
-    // 关键：重置开始时间，否则 elapsed = now - 旧的 startedAt 会非常大，
-    // 限时卷会立刻被判「时间到」自动交卷（本次 bug 的根因）
-    s.startedAt = Date.now();
+    s.startedAt = Date.now();                 // 新的一轮从此刻起算，历史时长已在 baseElapsed 里
     // 回到上次离开的题号；若没有则定位到第一道未作答（无答案记录的）题
     let pos = (typeof s.pos === 'number' && s.pos >= 0 && s.pos < total) ? s.pos : s.qids.findIndex(qid => !s.answers[qid]);
     if(pos === -1) pos = 0;
@@ -1148,7 +1166,7 @@ function resumeDoneSession(sid){
   } else {
     // ② 另起新卷：沿用原卷的 paperId / 模式 / 题型 / 限时，全新会话
     const ns = { id: uid('s'), paperId: s.paperId, paperName: s.paperName, mode: s.mode || 'full', types: s.types || null,
-      timeLimit: s.timeLimit || null, startedAt: Date.now(), finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: (s.qids || []).slice() };
+      timeLimit: s.timeLimit || null, startedAt: Date.now(), firstStartedAt: Date.now(), baseElapsed: 0, finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: (s.qids || []).slice() };
     sessions.push(ns); saveSessions();
     state.reportOpenId = null; state.tab = 'quiz';
     enterQuiz(ns.id);
@@ -1221,6 +1239,11 @@ function saveQuiz(){
   if(!s){ state.quizView = false; state.quiz = null; state.tab = 'quiz'; render(); return; }
   // 离开前先结算当前这题的停留时间，下次回来接着算，不丢
   if(state.quiz) qtAccrue(s, s.qids[state.quiz.pos], state.quiz.shownAt, Date.now());
+  // 顶部总用时也结算：把这一轮的时长并入 baseElapsed，startedAt 归位。
+  // 这样「保存→继续」与「交卷→重开」用的是同一套累计算法，离开 App 期间的时间不会被误计。
+  const sitting = (s.startedAt ? (Date.now() - s.startedAt) / 1000 : 0);
+  s.baseElapsed = Math.round(((typeof s.baseElapsed === 'number' && s.baseElapsed > 0 ? s.baseElapsed : 0) + Math.max(0, sitting)) * 10) / 10;
+  s.startedAt = Date.now();
   s.pos = state.quiz ? state.quiz.pos : (s.pos || 0);      // 记录当前题号，便于下次续做
   saveSessions();
   const answeredN = s.qids.filter(id => s.answers[id]).length;
@@ -1268,7 +1291,7 @@ function viewQuizRun(){
   if(!cur){ state.quizView = false; return `<main><div class="card empty">试卷数据异常</div></main>`; }
   const question = cur.question;
   const answeredN = s.qids.filter(id => s.answers[id]).length;
-  const elapsed = (Date.now() - s.startedAt) / 1000;                 // 已用时间（正计时）
+  const elapsed = totalElapsed(s, Date.now());                       // 已用时间（跨次进入累计的正计时）
   const remain = s.timeLimit ? s.timeLimit - elapsed : null;
   const overtime = remain !== null && remain <= 0;
   const a = s.answers[question.id];
@@ -1332,7 +1355,7 @@ function viewQuizRun(){
 function quizTick(){
   if(!state.quizView || !state.quiz) return;
   const s = currentSession(); if(!s) return;
-  const elapsed = (Date.now() - s.startedAt) / 1000;      // 已用时间（正计时）
+  const elapsed = totalElapsed(s, Date.now());            // 已用时间（跨次进入累计的正计时）
   const el = $('#quizTimer');
   if(el){
     el.textContent = '⏱ ' + fmtClock(elapsed);
@@ -1342,10 +1365,8 @@ function quizTick(){
       span.textContent = ' / 限时' + fmtClock(s.timeLimit);
       el.appendChild(span);
       if(s.timeLimit - elapsed < 300) el.classList.add('warn');
-      // 防御：仅当 startedAt 合理（不早于限时窗口的 2 倍，且非未来时间）时才自动交卷，
-      // 避免历史数据里残留的异常 startedAt 导致一进考场就「时间到」
-      const sane = s.startedAt && s.startedAt <= Date.now() + 60000 && (Date.now() - s.startedAt) <= (s.timeLimit * 2 * 1000 + 3600 * 1000);
-      if(elapsed >= s.timeLimit && sane){ toast('时间到，自动交卷'); finishQuiz(); return; }
+      // 限时是硬约束：累计用时达到限时就自动交卷（elapsed 已含历史累计，不会误判）
+      if(elapsed >= s.timeLimit){ toast('时间到，自动交卷'); finishQuiz(); return; }
     }
   }
   // 本题用时（任何题都实时走动，含已答/已改选）
@@ -1388,7 +1409,7 @@ function viewReportDetail(){
       <div><div class="v">${st.totalQ ? Math.round(st.scoreRate * 100) + '%' : '--'}</div><div class="l">得分率</div></div>
       <div><div class="v green">${st.correct}<span style="font-size:13px;color:var(--gray)">/${st.totalQ}</span></div><div class="l">答对/计分题</div></div>
       <div><div class="v">${fmtSec(st.totalTime)}</div><div class="l">总用时</div></div></div>
-    <div class="muted" style="margin-top:10px;text-align:center">平均每题 ${fmtSec(st.avgTime)} · ${fmtTime(s.startedAt)} ~ ${fmtTime(s.finishedAt)}</div></div>`;
+    <div class="muted" style="margin-top:10px;text-align:center">平均每题 ${fmtSec(st.avgTime)} · ${fmtTime(s.firstStartedAt || s.startedAt)} ~ ${fmtTime(s.finishedAt)}</div></div>`;
   html += `<div class="card"><h3>📌 题型统计</h3><table class="stats"><tr><th>题型</th><th>题数</th><th>得分率</th><th>平均用时</th></tr>`;
   st.types.forEach(t => {
     html += `<tr><td>${esc(t.type)}</td><td>${t.correct}/${t.scorable}</td><td><span class="tag ${t.rate >= 0.8 ? 'green' : t.rate >= 0.6 ? 'orange' : 'red'}">${Math.round(t.rate * 100)}%</span></td><td>${fmtSec(t.avgTime)}</td></tr>`;
@@ -1612,7 +1633,7 @@ function viewMine(){
     <details class="fold"><summary>文本怎么粘识别率最高？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     保持「1. 题干」换行「A. 选项」结构，末尾附答案（如"参考答案：1-5 BADCB"或"1.B 2.D"）。行内多选项（A.xx B.xx 全角空格分隔）、选项跨行都能识别。个别解析错误的题在第二步校对编辑器里改一下即可。</div></details>
     <details class="fold"><summary>每题用时怎么算的？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
-    顶部显示<b>已用时间（正计时）</b>，从开始答题累计；若设了限时，右侧附「/ 限时 mm:ss」作参考，到点自动交卷。<b>每题下方有一行「本题用时」</b>：<b>只要停在这道题上就实时走动</b>——未作答在走、已作答返回在走、改选犹豫也在走，切到别的题就结算停下，回来接着累加。<b>每道题的用时之和 = 你在做题界面停留的总时长</b>，可用于对账。作答后可选自动跳下一题（可关闭）；<b>回看已答题可反复改选</b>（改选不重复跳题，该题的总停留时长照常累加）；点底部「答题卡」可打开网格总览跳题。<b>最终成绩以交卷时的最后一次选择为准。</b></div></details>
+    顶部显示<b>已用时间（正计时）</b>，从开始答题累计，<b>跨「保存→继续」「交卷→重开」多次进入也接着累计</b>（离开 App 的时间不计入）；若设了限时，右侧附「/ 限时 mm:ss」作参考，到点自动交卷。<b>每题下方有一行「本题用时」</b>：<b>只要停在这道题上就实时走动</b>——未作答在走、已作答返回在走、改选犹豫也在走，切到别的题就结算停下，回来接着累加。<b>每道题的用时之和 = 你在做题界面停留的总时长</b>，可用于对账。作答后可选自动跳下一题（可关闭）；<b>回看已答题可反复改选</b>（改选不重复跳题，该题的总停留时长照常累加）；点底部「答题卡」可打开网格总览跳题。<b>最终成绩以交卷时的最后一次选择为准。</b></div></details>
     <details class="fold"><summary>报告能导出吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     能。打开「报告」里任意一条记录，底部有 <b>📄 导出报告为 Markdown（.md）</b>，一键下载含总览、题型统计、诊断建议、逐题明细、错题回顾的 Markdown 文件，可直接传电脑/进笔记软件/交给 AI 分析；旁边还有「导出原始数据(.json)」给进阶用途。文件默认下载到浏览器下载目录。</div></details>
     <details class="fold"><summary>答题中途能保存退出吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
@@ -1620,7 +1641,7 @@ function viewMine(){
     <details class="fold"><summary>做题做到一半刷新/离开会丢记录吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     <b>不会。</b>每勾选一题即写入本地存储；切换题目、切到后台、锁屏、刷新、关闭页面都会兜底保存。重新进入该试卷时会自动回到上次离开的题号（没有则跳到第一道未答题）。若该试卷已有进行中的练习，点「开始」会先问你是续做还是重开，避免误开新卷看不到旧答案。</div></details>
     <details class="fold"><summary>交卷后还能再做这套卷子吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
-    <b>能。</b>已交卷的卷子在「报告」列表、报告详情页，以及「题库」页对应试卷处，都有一个 <b>▶ 继续做题</b> 按钮。点它会让你二选一：<b>① 继续做这一套</b>——回到原进度，保留全部作答与用时，可逐题回看、改选、重答，改完再交卷（原报告会被这次的新结果取代）；<b>② 另起一套重新做</b>——保留原来那份成绩报告不动，重新开一套全新的卷子从第 1 题做起。两种方式都不会丢数据，想留旧成绩就选「另起一套」。</div></details>
+    <b>能。</b>已交卷的卷子在「报告」列表、报告详情页，以及「题库」页对应试卷处，都有一个 <b>▶ 继续做题</b> 按钮。点它会让你二选一：<b>① 继续做这一套</b>——回到原进度，保留全部作答与用时，可逐题回看、改选、重答，改完再交卷（原报告会被这次的新结果取代）；<b>② 另起一套重新做</b>——保留原来那份成绩报告不动，重新开一套全新的卷子从第 1 题做起。两种方式都不会丢数据，想留旧成绩就选「另起一套」。<br><b>计时口径</b>：「继续做这一套」和答题中途的「💾 保存→继续做题」用的是<b>同一套算法</b>——顶部总用时、每题用时都<b>从上次的累计上接着走，绝不归零</b>；唯一区别是交卷会判分，而重开旧卷后再交卷会覆盖上一次的判分。</div></details>
     <details class="fold"><summary>报告怎么帮我定位弱项？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     题型得分率低于 60% → 标「需提高准确率」；题型平均用时超过全卷均值 20% → 标「需提高速度」；单题用时超均值 50% → 明细标「慢」。双差题型优先专项练习（刷题页可选按题型专项）。</div></details>
     <details class="fold"><summary>判断推理能细分统计吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
