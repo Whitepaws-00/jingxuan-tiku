@@ -688,15 +688,34 @@ function fmtSyncError(status, platform){
 // - 显示某题用时：qtimes[qid] + 本次停留（若正停留该题）
 // - 作答/改选都不影响计时，时间照常累计（回看、犹豫都算）
 //
-// 顶部「已用时间」同理跨多次进入累计：session.baseElapsed 记录**之前几次进出已累计的秒数**，
-// 当前这一次用 (now - startedAt)。「交卷后重开」与「答题中保存后继续」走的是同一套算法，
-// 计时都从上次的用时上接着累加，永不归零；差别只在交卷会判分、重开再交卷会覆盖旧判分。
-function totalElapsed(s, now){
-  if(!s) return 0;
-  const base = (typeof s.baseElapsed === 'number' && s.baseElapsed > 0) ? s.baseElapsed : 0;
+// 顶部「已用时间」直接由各题 qtimes 求和得到（见下方 totalElapsed），不再依赖开始/结束时间戳。
+// 这样「交卷后重开」与「答题中保存后继续」天然是同一套逻辑：历史用时跨次继承、永不归零，
+// 且手机锁屏/切后台/放置不动等 wall-clock 虚高不会影响限时判定。
+// 顶部「已用时间」= 各题累计停留之和（含当前正在停留的这段）。
+// 关键：绝不使用 startedAt/finishedAt 的 wall-clock 差值——手机锁屏、切后台、放着不动
+// 都会让 wall-clock 虚高，导致限时卷被误判「时间到」。用 qtimes 求和才是最稳、且与
+// 「每道题花的时间加起来 = 处于做题界面的时间」这一口径完全一致的算法。
+// 「交卷后重开」与「答题中保存后继续」因此天然同一套逻辑，历史用时跨次继承、永不归零。
+function totalElapsed(s, now, curQid, curShownAt){
+  if(!s || !Array.isArray(s.qids)) return 0;
   const t = (typeof now === 'number') ? now : Date.now();
-  const cur = s.startedAt ? Math.max(0, (t - s.startedAt) / 1000) : 0;
-  return base + cur;
+  let sum = 0;
+  for(const qid of s.qids){
+    let v = qtimesBase(s, qid);
+    // 当前正在停留的这道题：再补上 (now - shownAt) 这段实时值
+    if(curQid && qid === curQid && typeof curShownAt === 'number'){
+      v += Math.max(0, (t - curShownAt) / 1000);
+    }
+    sum += v;
+  }
+  return sum;
+}
+// 便捷版：从 state.quiz 自动取当前题，供视图/计时器直接调用
+function quizElapsed(s, now){
+  const q = state && state.quiz;
+  const curQid = (q && s && s.qids) ? s.qids[q.pos] : null;
+  const curShownAt = q ? q.shownAt : null;
+  return totalElapsed(s, (typeof now === 'number') ? now : Date.now(), curQid, curShownAt);
 }
 // 取某题历史累计用时的基础值：
 // - 新版优先用 qtimes[qid]
@@ -1113,7 +1132,7 @@ function beginQuiz(pid){
   const lim = +($('#timeLimitInput') ? $('#timeLimitInput').value : 0) || 0;
   settings.autoNext = !!(document.querySelector('#autoNextInput') && document.querySelector('#autoNextInput').checked);
   if(lim) settings.timeLimit = lim; saveSettings();
-  const s = { id: uid('s'), paperId: p.id, paperName: p.name, mode, types, timeLimit: lim ? lim * 60 : null, startedAt: Date.now(), firstStartedAt: Date.now(), baseElapsed: 0, finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: questions.map(q => q.id) };
+  const s = { id: uid('s'), paperId: p.id, paperName: p.name, mode, types, timeLimit: lim ? lim * 60 : null, startedAt: Date.now(), firstStartedAt: Date.now(), finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: questions.map(q => q.id) };
   sessions.push(s); saveSessions();
   state.quizConfigPid = null;
   enterQuiz(s.id);
@@ -1122,8 +1141,7 @@ function enterQuiz(sid){
   const s = sessions.find(x => x.id === sid); if(!s) return;
   const p = papers.find(x => x.id === s.paperId);
   if(!p){ toast('试卷已被删除，无法继续'); sessions = sessions.filter(x => x.id !== sid); saveSessions(); render(); return; }
-  // 旧数据兼容：补齐计时相关字段，保证「保存→继续」与「交卷→重开」同一套累计算法
-  if(typeof s.baseElapsed !== 'number') s.baseElapsed = 0;
+  // 旧数据兼容：补齐计时相关字段
   if(!s.firstStartedAt) s.firstStartedAt = s.startedAt || Date.now();
   if(!s.startedAt) s.startedAt = Date.now();
   // 恢复进度：优先回到离开时的题号（pos 已持久化），否则找第一道未答题
@@ -1149,13 +1167,12 @@ function resumeDoneSession(sid){
     `点「确定」→ 继续做这一套（回到原进度，可改选/重答后再交卷；原报告将被本卷覆盖）\n` +
     `点「取消」→ 保留原记录，另起一套全新的重新做`;
   if(confirm(msg)){
-    // ① 重开原卷：状态回到 ongoing，清掉交卷时间与报告入口，保留作答与每题用时
-    // 计时口径与「答题中保存后继续」完全一致：顶部总用时从上次累计接着走，绝不归零。
-    // 做法：把上一次这一轮的时长（finishedAt - startedAt）并入 baseElapsed，再把 startedAt 归到现在。
-    const prevSitting = (s.startedAt && s.finishedAt && s.finishedAt > s.startedAt) ? (s.finishedAt - s.startedAt) / 1000 : 0;
-    s.baseElapsed = Math.round(((typeof s.baseElapsed === 'number' && s.baseElapsed > 0 ? s.baseElapsed : 0) + prevSitting) * 10) / 10;
+    // ① 重开原卷：状态回到 ongoing，清掉交卷时间与报告入口，保留作答与每题用时。
+    // 计时口径与「答题中保存后继续」完全一致：总用时由各题 qtimes 求和得到，
+    // 天然跨次继承、永不归零；这里只需把状态改回进行中并归位开始时间（仅供「作答时间」展示）。
     s.status = 'ongoing'; s.finishedAt = null;
-    s.startedAt = Date.now();                 // 新的一轮从此刻起算，历史时长已在 baseElapsed 里
+    s.startedAt = Date.now();
+    if(!s.firstStartedAt) s.firstStartedAt = s.startedAt;
     // 回到上次离开的题号；若没有则定位到第一道未作答（无答案记录的）题
     let pos = (typeof s.pos === 'number' && s.pos >= 0 && s.pos < total) ? s.pos : s.qids.findIndex(qid => !s.answers[qid]);
     if(pos === -1) pos = 0;
@@ -1166,7 +1183,7 @@ function resumeDoneSession(sid){
   } else {
     // ② 另起新卷：沿用原卷的 paperId / 模式 / 题型 / 限时，全新会话
     const ns = { id: uid('s'), paperId: s.paperId, paperName: s.paperName, mode: s.mode || 'full', types: s.types || null,
-      timeLimit: s.timeLimit || null, startedAt: Date.now(), firstStartedAt: Date.now(), baseElapsed: 0, finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: (s.qids || []).slice() };
+      timeLimit: s.timeLimit || null, startedAt: Date.now(), firstStartedAt: Date.now(), finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: (s.qids || []).slice() };
     sessions.push(ns); saveSessions();
     state.reportOpenId = null; state.tab = 'quiz';
     enterQuiz(ns.id);
@@ -1239,10 +1256,7 @@ function saveQuiz(){
   if(!s){ state.quizView = false; state.quiz = null; state.tab = 'quiz'; render(); return; }
   // 离开前先结算当前这题的停留时间，下次回来接着算，不丢
   if(state.quiz) qtAccrue(s, s.qids[state.quiz.pos], state.quiz.shownAt, Date.now());
-  // 顶部总用时也结算：把这一轮的时长并入 baseElapsed，startedAt 归位。
-  // 这样「保存→继续」与「交卷→重开」用的是同一套累计算法，离开 App 期间的时间不会被误计。
-  const sitting = (s.startedAt ? (Date.now() - s.startedAt) / 1000 : 0);
-  s.baseElapsed = Math.round(((typeof s.baseElapsed === 'number' && s.baseElapsed > 0 ? s.baseElapsed : 0) + Math.max(0, sitting)) * 10) / 10;
+  // 总用时由各题 qtimes 求和，天然累计；这里只把 startedAt 归位（仅供报告「作答时间」展示）
   s.startedAt = Date.now();
   s.pos = state.quiz ? state.quiz.pos : (s.pos || 0);      // 记录当前题号，便于下次续做
   saveSessions();
@@ -1291,7 +1305,7 @@ function viewQuizRun(){
   if(!cur){ state.quizView = false; return `<main><div class="card empty">试卷数据异常</div></main>`; }
   const question = cur.question;
   const answeredN = s.qids.filter(id => s.answers[id]).length;
-  const elapsed = totalElapsed(s, Date.now());                       // 已用时间（跨次进入累计的正计时）
+  const elapsed = quizElapsed(s, Date.now());                       // 已用时间 = 各题停留之和（跨次累计）
   const remain = s.timeLimit ? s.timeLimit - elapsed : null;
   const overtime = remain !== null && remain <= 0;
   const a = s.answers[question.id];
@@ -1355,7 +1369,7 @@ function viewQuizRun(){
 function quizTick(){
   if(!state.quizView || !state.quiz) return;
   const s = currentSession(); if(!s) return;
-  const elapsed = totalElapsed(s, Date.now());            // 已用时间（跨次进入累计的正计时）
+  const elapsed = quizElapsed(s, Date.now());            // 已用时间 = 各题停留之和（跨次累计）
   const el = $('#quizTimer');
   if(el){
     el.textContent = '⏱ ' + fmtClock(elapsed);
