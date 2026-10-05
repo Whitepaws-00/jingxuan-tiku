@@ -398,9 +398,8 @@ function buildStats(session, questions){
   let correct = 0, answered = 0, totalTime = 0;
   questions.forEach((q, i) => {
     const a = session.answers[q.id] || null;
-    // 用时口径：优先取 qtimes 累计停留时长（含回看/改选），旧数据回退到 a.time
-    const qtv = qtimesGet(session, q.id);
-    const recTime = qtv > 0 ? qtv : (a ? (a.time || 0) : 0);
+    // 用时口径：qtimes 累计停留时长（含回看/改选）；旧数据 qtimesGet 会自动回退到 a.time
+    const recTime = qtimesGet(session, q.id);
     const rec = { qid: q.id, num: i + 1, type: q.type || '未分类', answer: q.answer || '', choice: a ? a.choice : '', correct: a ? !!a.correct : false, time: recTime, marked: a ? !!a.marked : false, skipped: !a };
     perQ.push(rec);
     if(a){ answered++; totalTime += rec.time; if(rec.correct) correct++; }
@@ -688,24 +687,33 @@ function fmtSyncError(status, platform){
 // - 离开某题时结算：把 shownAt→now 这段累加进 qtimes[qid]
 // - 显示某题用时：qtimes[qid] + 本次停留（若正停留该题）
 // - 作答/改选都不影响计时，时间照常累计（回看、犹豫都算）
-function qtimesGet(s, qid){
-  if(!s || !s.qtimes) return 0;
-  const v = s.qtimes[qid];
-  return (typeof v === 'number' && v > 0) ? v : 0;
+// 取某题历史累计用时的基础值：
+// - 新版优先用 qtimes[qid]
+// - 旧版数据没有 qtimes 时，回退到 answers[qid].time（避免重开旧卷时历史用时丢失/归零）
+function qtimesBase(s, qid){
+  if(!s || !qid) return 0;
+  const q = s.qtimes ? s.qtimes[qid] : undefined;
+  if(typeof q === 'number' && q > 0) return q;
+  const a = s.answers ? s.answers[qid] : null;
+  if(a && typeof a.time === 'number' && a.time > 0) return a.time;
+  return 0;
 }
+function qtimesGet(s, qid){ return qtimesBase(s, qid); }
 // 结算：把某题从 shownAt 到现在的一段停留时间累加进 qtimes（任何题都累计，含已答/已改选）
+// 注意：首次结算会以 qtimesBase 为起点，从而把旧数据的 answers.time 平滑迁移进 qtimes
 function qtAccrue(s, qid, shownAt, now){
   if(!s || !qid) return 0;
   const dt = Math.max(0, (now - shownAt) / 1000);
-  if(dt <= 0) return qtimesGet(s, qid);
+  if(dt <= 0) return qtimesBase(s, qid);
   if(!s.qtimes) s.qtimes = {};
-  s.qtimes[qid] = Math.round((qtimesGet(s, qid) + dt) * 10) / 10;
+  const base = qtimesBase(s, qid);
+  s.qtimes[qid] = Math.round((base + dt) * 10) / 10;
   return s.qtimes[qid];
 }
 // 计算某题当前应显示的秒数：累计值 + 本次停留（若此刻正停留该题）
 // 若 qid 是当前题，传 shownAt 与 now；否则传相同的值与 null 风格的 shownAt 不会影响
 function qTimeDisplay(s, qid, shownAt, now, isCurrent){
-  const acc = qtimesGet(s, qid);
+  const acc = qtimesBase(s, qid);
   if(isCurrent === false) return acc;                    // 非当前题：只显示已累计值
   return acc + Math.max(0, (now - shownAt) / 1000);
 }
@@ -1125,8 +1133,11 @@ function resumeDoneSession(sid){
     `点「确定」→ 继续做这一套（回到原进度，可改选/重答后再交卷；原报告将被本卷覆盖）\n` +
     `点「取消」→ 保留原记录，另起一套全新的重新做`;
   if(confirm(msg)){
-    // ① 重开原卷：状态回到 ongoing，清掉交卷时间与报告入口，保留作答与用时
+    // ① 重开原卷：状态回到 ongoing，清掉交卷时间与报告入口，保留作答与每题用时
     s.status = 'ongoing'; s.finishedAt = null;
+    // 关键：重置开始时间，否则 elapsed = now - 旧的 startedAt 会非常大，
+    // 限时卷会立刻被判「时间到」自动交卷（本次 bug 的根因）
+    s.startedAt = Date.now();
     // 回到上次离开的题号；若没有则定位到第一道未作答（无答案记录的）题
     let pos = (typeof s.pos === 'number' && s.pos >= 0 && s.pos < total) ? s.pos : s.qids.findIndex(qid => !s.answers[qid]);
     if(pos === -1) pos = 0;
@@ -1225,7 +1236,14 @@ function finishQuiz(){
   if(state.quiz) qtAccrue(s, s.qids[state.quiz.pos], state.quiz.shownAt, Date.now());
   // 未作答（跳过）的题补一条空答记录，并同步其用时（便于报告展示）
   s.qids.forEach(qid => { if(!s.answers[qid]) s.answers[qid] = { choice: '', correct: false, time: 0 }; });
-  s.qids.forEach(qid => { const a = s.answers[qid]; if(a) a.time = Math.round(qtimesGet(s, qid)); });
+  // 把每题用时快照同步为 qtimes（总停留）。注意：旧数据可能没有 qtimes，
+  // 此时必须保留原有 a.time，绝不能被 0 覆盖（否则旧卷用时全部归零）
+  s.qids.forEach(qid => {
+    const a = s.answers[qid]; if(!a) return;
+    const acc = qtimesGet(s, qid);
+    if(acc > 0) a.time = Math.round(acc);
+    else if(typeof a.time !== 'number' || !(a.time > 0)) a.time = 0;
+  });
   s.status = 'done'; s.finishedAt = Date.now(); saveSessions();
   const p = papers.find(x => x.id === s.paperId);
   if(p){
@@ -1324,7 +1342,10 @@ function quizTick(){
       span.textContent = ' / 限时' + fmtClock(s.timeLimit);
       el.appendChild(span);
       if(s.timeLimit - elapsed < 300) el.classList.add('warn');
-      if(elapsed >= s.timeLimit){ toast('时间到，自动交卷'); finishQuiz(); return; }
+      // 防御：仅当 startedAt 合理（不早于限时窗口的 2 倍，且非未来时间）时才自动交卷，
+      // 避免历史数据里残留的异常 startedAt 导致一进考场就「时间到」
+      const sane = s.startedAt && s.startedAt <= Date.now() + 60000 && (Date.now() - s.startedAt) <= (s.timeLimit * 2 * 1000 + 3600 * 1000);
+      if(elapsed >= s.timeLimit && sane){ toast('时间到，自动交卷'); finishQuiz(); return; }
     }
   }
   // 本题用时（任何题都实时走动，含已答/已改选）
