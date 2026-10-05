@@ -49,9 +49,12 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--blue)}
 .tag.red{background:#fdecec;color:var(--red)}
 .tag.green{background:#e8f6ef;color:var(--green)}
 .tag.orange{background:#fff4e0;color:#b26d00}
-.paper-item{display:flex;align-items:center;gap:10px}
-.paper-item .meta{flex:1;min-width:0}
+.paper-item{display:flex;flex-direction:column;align-items:stretch;gap:8px}
+.paper-item .meta{min-width:0}
 .paper-item .name{font-weight:600;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paper-item .typesline{white-space:normal;line-height:1.6;word-break:break-word}
+.paper-item .pactions{display:flex;flex-wrap:wrap;gap:8px}
+.paper-item .pactions .btn{flex:0 0 auto}
 .empty{text-align:center;padding:36px 20px;color:var(--gray)}
 .empty .big{font-size:42px;margin-bottom:8px}
 /* 编辑器 */
@@ -822,10 +825,12 @@ function viewLibrary(){
       const doneHint = (!ongoing && lastDone) ? ` · <span style="color:var(--green)">已做（${lastDone.qids.filter(id=>lastDone.answers[id]).length} 题）</span>` : '';
       html += `<div class="card paper-item">
         <div class="meta"><div class="name">${esc(p.name)}</div>
-        <div class="muted">${p.questions.length} 题 · 带题干${fullN}题 · ${esc(typesStr)}${ongoing ? ` · <span style="color:var(--orange)">未完成练习（已答 ${onAnsN} 题）</span>` : doneHint}</div></div>
-        ${ongoing ? `<button class="btn btn-primary btn-sm" data-act="quiz-resume" data-sid="${ongoing.id}">▶ 继续做题</button>` : (lastDone ? `<button class="btn btn-primary btn-sm" data-act="resume-done" data-sid="${lastDone.id}">▶ 继续做（重开）</button><button class="btn btn-sm" data-act="quiz-config" data-pid="${p.id}">新一套</button>` : `<button class="btn btn-primary btn-sm" data-act="quiz-config" data-pid="${p.id}">去刷题</button>`)}
-        <button class="btn btn-sm" data-act="edit-open" data-pid="${p.id}">编辑</button>
-        <button class="btn btn-sm btn-danger" data-act="del-paper" data-pid="${p.id}">删</button></div>`;
+        <div class="muted typesline">${p.questions.length} 题 · 带题干${fullN}题 · ${esc(typesStr)}${ongoing ? ` · <span style="color:var(--orange)">未完成练习（已答 ${onAnsN} 题）</span>` : doneHint}</div></div>
+        <div class="pactions">
+          ${ongoing ? `<button class="btn btn-primary btn-sm" data-act="quiz-resume" data-sid="${ongoing.id}">▶ 继续做题</button>` : (lastDone ? `<button class="btn btn-primary btn-sm" data-act="resume-done" data-sid="${lastDone.id}">▶ 继续做（重开）</button><button class="btn btn-sm" data-act="quiz-config" data-pid="${p.id}">新一套</button>` : `<button class="btn btn-primary btn-sm" data-act="quiz-config" data-pid="${p.id}">去刷题</button>`)}
+          <button class="btn btn-sm" data-act="edit-open" data-pid="${p.id}">编辑</button>
+          <button class="btn btn-sm btn-danger" data-act="del-paper" data-pid="${p.id}">删</button>
+        </div></div>`;
     });
   }
   return html;
@@ -1051,8 +1056,8 @@ function viewQuizTab(){
       p.questions.forEach(q => { byType[q.type || '未分类'] = (byType[q.type||'未分类']||0) + 1; });
       const typesStr = Object.keys(byType).map(k => `${k}×${byType[k]}`).join('　');
       html += `<div class="paper-item" style="padding:10px 0;border-bottom:1px solid #f2f4f9">
-        <div class="meta"><div class="name">${esc(p.name)}</div><div class="muted">${p.questions.length} 题 · ${esc(typesStr)}</div></div>
-        <button class="btn btn-primary btn-sm" data-act="quiz-config" data-pid="${p.id}">开始</button></div>`;
+        <div class="meta"><div class="name">${esc(p.name)}</div><div class="muted typesline">${p.questions.length} 题 · ${esc(typesStr)}</div></div>
+        <div class="pactions"><button class="btn btn-primary btn-sm" data-act="quiz-config" data-pid="${p.id}">开始</button></div></div>`;
     });
   }
   html += `</div>`;
