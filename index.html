@@ -813,15 +813,17 @@ function viewLibrary(){
   } else {
     papers.slice().sort((a,b)=>b.createdAt-a.createdAt).forEach(p => {
       const ongoing = sessions.find(s => s.paperId === p.id && s.status === 'ongoing');
+      const lastDone = sessions.filter(s => s.paperId === p.id && s.status === 'done').sort((a,b)=>(b.finishedAt||0)-(a.finishedAt||0))[0];
       const byType = {};
       p.questions.forEach(q => { byType[q.type || '未分类'] = (byType[q.type||'未分类']||0) + 1; });
       const typesStr = Object.keys(byType).map(k => `${k}×${byType[k]}`).join('　');
       const fullN = p.questions.filter(hasContent).length;
       const onAnsN = ongoing ? ongoing.qids.filter(id => ongoing.answers[id]).length : 0;
+      const doneHint = (!ongoing && lastDone) ? ` · <span style="color:var(--green)">已做（${lastDone.qids.filter(id=>lastDone.answers[id]).length} 题）</span>` : '';
       html += `<div class="card paper-item">
         <div class="meta"><div class="name">${esc(p.name)}</div>
-        <div class="muted">${p.questions.length} 题 · 带题干${fullN}题 · ${esc(typesStr)}${ongoing ? ` · <span style="color:var(--orange)">未完成练习（已答 ${onAnsN} 题）</span>` : ''}</div></div>
-        ${ongoing ? `<button class="btn btn-primary btn-sm" data-act="quiz-resume" data-sid="${ongoing.id}">▶ 继续做题</button>` : `<button class="btn btn-primary btn-sm" data-act="quiz-config" data-pid="${p.id}">去刷题</button>`}
+        <div class="muted">${p.questions.length} 题 · 带题干${fullN}题 · ${esc(typesStr)}${ongoing ? ` · <span style="color:var(--orange)">未完成练习（已答 ${onAnsN} 题）</span>` : doneHint}</div></div>
+        ${ongoing ? `<button class="btn btn-primary btn-sm" data-act="quiz-resume" data-sid="${ongoing.id}">▶ 继续做题</button>` : (lastDone ? `<button class="btn btn-primary btn-sm" data-act="resume-done" data-sid="${lastDone.id}">▶ 继续做（重开）</button><button class="btn btn-sm" data-act="quiz-config" data-pid="${p.id}">新一套</button>` : `<button class="btn btn-primary btn-sm" data-act="quiz-config" data-pid="${p.id}">去刷题</button>`)}
         <button class="btn btn-sm" data-act="edit-open" data-pid="${p.id}">编辑</button>
         <button class="btn btn-sm btn-danger" data-act="del-paper" data-pid="${p.id}">删</button></div>`;
     });
@@ -1105,6 +1107,38 @@ function enterQuiz(sid){
   const answeredN = s.qids.filter(id => s.answers[id]).length;
   if(answeredN) toast(`已恢复进度，从第 ${pos + 1} 题继续（已答 ${answeredN}/${s.qids.length}）`);
 }
+// 已交卷的卷子「继续做题」：默认回到那套卷子原样继续（可改选、可重答后再交卷）
+// 提供两条路径：① 重开原卷（覆盖原报告，保留历史不计；原报告将被本卷取代）② 保留原记录另起新卷
+function resumeDoneSession(sid){
+  const s = sessions.find(x => x.id === sid); if(!s) return;
+  const p = papers.find(x => x.id === s.paperId);
+  if(!p){ toast('试卷已被删除，无法继续'); return; }
+  // 已答/跳过题一并视为「已作答」（跳过也写入了空答记录），真正未作答为 answers 里没有 qid
+  const total = s.qids.length;
+  const done = Object.keys(s.answers).length;
+  const msg = `「${s.paperName}」已交卷（${fmtTime(s.finishedAt)}）。\n\n` +
+    `点「确定」→ 继续做这一套（回到原进度，可改选/重答后再交卷；原报告将被本卷覆盖）\n` +
+    `点「取消」→ 保留原记录，另起一套全新的重新做`;
+  if(confirm(msg)){
+    // ① 重开原卷：状态回到 ongoing，清掉交卷时间与报告入口，保留作答与用时
+    s.status = 'ongoing'; s.finishedAt = null;
+    // 回到上次离开的题号；若没有则定位到第一道未作答（无答案记录的）题
+    let pos = (typeof s.pos === 'number' && s.pos >= 0 && s.pos < total) ? s.pos : s.qids.findIndex(qid => !s.answers[qid]);
+    if(pos === -1) pos = 0;
+    s.pos = pos;
+    saveSessions();
+    state.reportOpenId = null; state.tab = 'quiz';
+    enterQuiz(sid);
+  } else {
+    // ② 另起新卷：沿用原卷的 paperId / 模式 / 题型 / 限时，全新会话
+    const ns = { id: uid('s'), paperId: s.paperId, paperName: s.paperName, mode: s.mode || 'full', types: s.types || null,
+      timeLimit: s.timeLimit || null, startedAt: Date.now(), finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: (s.qids || []).slice() };
+    sessions.push(ns); saveSessions();
+    state.reportOpenId = null; state.tab = 'quiz';
+    enterQuiz(ns.id);
+    toast('已另起一套，原成绩报告保留');
+  }
+}
 function curInfo(){
   const s = currentSession(), q = state.quiz;
   if(!s || !q) return null;
@@ -1310,7 +1344,8 @@ function viewReportList(){
     html += `<div class="card" data-act="report-open" data-sid="${s.id}" style="cursor:pointer">
       <div class="row"><div class="grow"><div style="font-weight:600">${esc(s.paperName)}</div>
       <div class="muted">${fmtTime(s.finishedAt)} · ${s.mode === 'special' ? '专项' : '整卷'} · ${st.totalQ ? Math.round(st.scoreRate * 100) : '--'}% · 用时 ${fmtSec(st.totalTime)}</div></div>
-      <span class="tag ${st.scoreRate >= 0.8 ? 'green' : st.scoreRate >= 0.6 ? 'orange' : 'red'}" style="font-size:15px;padding:6px 12px">${st.totalQ ? Math.round(st.scoreRate * 100) + '%' : '--'}</span></div></div>`;
+      <span class="tag ${st.scoreRate >= 0.8 ? 'green' : st.scoreRate >= 0.6 ? 'orange' : 'red'}" style="font-size:15px;padding:6px 12px">${st.totalQ ? Math.round(st.scoreRate * 100) + '%' : '--'}</span></div>
+      <div class="row" style="margin-top:8px"><button class="btn btn-sm" data-act="resume-done" data-sid="${s.id}">▶ 继续做题</button></div></div>`;
   });
   return html;
 }
@@ -1359,7 +1394,8 @@ function viewReportDetail(){
   html += `</div>`;
   const wrongIds = st.perQ.filter(r => !r.skipped && !r.correct && r.answer).map(r => r.qid);
   if(wrongIds.length) html += `<button class="btn btn-green btn-block" data-act="redo-wrong-from-report" data-ids="${wrongIds.join(',')}">⭐ 立即重做本次错题（${wrongIds.length} 题）</button><div style="height:10px"></div>`;
-  html += `<button class="btn btn-primary btn-block" data-act="export-report-md" data-sid="${s.id}">📄 导出报告为 Markdown（.md）</button>
+  html += `<button class="btn btn-primary btn-block" data-act="resume-done" data-sid="${s.id}">▶ 继续做这套卷子</button>
+    <button class="btn btn-block" data-act="export-report-md" data-sid="${s.id}">📄 导出报告为 Markdown（.md）</button>
     <button class="btn btn-block" data-act="export-report-json" data-sid="${s.id}">🧾 导出原始数据（.json）</button><div style="height:20px"></div>`;
   return html;
 }
@@ -1557,6 +1593,8 @@ function viewMine(){
     <b>能。</b>答题页顶部和底部都有 <b>💾 保存</b> 按钮（交卷旁边），点一下即保存全部作答和当前题号并退出。回到「题库」，该试卷会显示「未完成练习（已答 N 题）」和 <b>▶ 继续做题</b> 按钮，点进去自动跳回上次离开的题号继续答。左上角「‹ 退出」也是同样的保存逻辑（仅多一次确认）。</div></details>
     <details class="fold"><summary>做题做到一半刷新/离开会丢记录吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     <b>不会。</b>每勾选一题即写入本地存储；切换题目、切到后台、锁屏、刷新、关闭页面都会兜底保存。重新进入该试卷时会自动回到上次离开的题号（没有则跳到第一道未答题）。若该试卷已有进行中的练习，点「开始」会先问你是续做还是重开，避免误开新卷看不到旧答案。</div></details>
+    <details class="fold"><summary>交卷后还能再做这套卷子吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
+    <b>能。</b>已交卷的卷子在「报告」列表、报告详情页，以及「题库」页对应试卷处，都有一个 <b>▶ 继续做题</b> 按钮。点它会让你二选一：<b>① 继续做这一套</b>——回到原进度，保留全部作答与用时，可逐题回看、改选、重答，改完再交卷（原报告会被这次的新结果取代）；<b>② 另起一套重新做</b>——保留原来那份成绩报告不动，重新开一套全新的卷子从第 1 题做起。两种方式都不会丢数据，想留旧成绩就选「另起一套」。</div></details>
     <details class="fold"><summary>报告怎么帮我定位弱项？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     题型得分率低于 60% → 标「需提高准确率」；题型平均用时超过全卷均值 20% → 标「需提高速度」；单题用时超均值 50% → 明细标「慢」。双差题型优先专项练习（刷题页可选按题型专项）。</div></details>
     <details class="fold"><summary>判断推理能细分统计吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
@@ -1833,6 +1871,7 @@ document.addEventListener('click', e => {
     case 'quiz-config': state.tab = 'quiz'; state.quizConfigPid = el.dataset.pid; render(); break;
     case 'quiz-begin': beginQuiz(el.dataset.pid); break;
     case 'quiz-resume': enterQuiz(el.dataset.sid); break;
+    case 'resume-done': resumeDoneSession(el.dataset.sid); break;
     case 'quiz-abandon': { if(confirm('放弃后本次作答将删除（不生成报告），确定？')){ sessions = sessions.filter(x => x.id !== el.dataset.sid); saveSessions(); render(); } break; }
     case 'pick': { const cur = curInfo(); if(cur) pick(el.dataset.key); break; }
     case 'quiz-next': nextQ(); break;
