@@ -1,10 +1,16 @@
 // 京选刷题 Service Worker：离线缓存（安装为 APP 后无网可用）
-const CACHE = 'jxst-v2';
+const CACHE = 'jxst-v3';
 const CORE = [
   './',
   './index.html',
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+];
+// OCR 资源（扫描版 PDF 识别用）：不在安装时预下载（避免拖慢首次安装、浪费流量），
+// 但一旦用过就进缓存，之后离线也能识别扫描件。
+const OCR_HOSTS = [
+  /(^|\.)cdn\.jsdelivr\.net$/,
+  /(^|\.)tessdata\.projectnaptha\.com$/
 ];
 
 self.addEventListener('install', e => {
@@ -19,7 +25,9 @@ self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
-  const isCore = url.origin === location.origin || /cdnjs\.cloudflare\.com/.test(url.hostname);
+  const isCore = url.origin === location.origin
+    || /cdnjs\.cloudflare\.com/.test(url.hostname)
+    || OCR_HOSTS.some(re => re.test(url.hostname));
   if (!isCore) return;
   // 导航请求：缓存优先，后台更新；资源：缓存优先，缺失时联网并回填
   e.respondWith(
