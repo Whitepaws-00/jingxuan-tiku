@@ -86,6 +86,15 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--blue)}
 .q-time{margin-top:12px;font-size:12.5px;color:var(--gray);text-align:right;font-variant-numeric:tabular-nums}
 .q-time b{color:var(--blue);font-weight:700;font-size:14px}
 .q-stem{background:#fff;border-radius:14px;padding:16px;font-size:16px;line-height:1.75;white-space:pre-wrap;box-shadow:0 1px 3px rgba(28,35,51,.06)}
+/* 材料题共享材料 */
+.q-material{background:#fffdf5;border:1px solid #f0e2b8;border-radius:14px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(28,35,51,.06)}
+.q-material>summary{cursor:pointer;font-size:13.5px;font-weight:600;color:#9a7b17;list-style:none}
+.q-material>summary::-webkit-details-marker{display:none}
+.q-material-body{margin-top:8px;font-size:15px;line-height:1.8;white-space:pre-wrap;max-height:340px;overflow:auto;color:#3a3520}
+/* 图形题图片占位 */
+.q-imgmiss{background:#f4f7ff;border:1px dashed #b9caf5;border-radius:12px;padding:14px;margin:10px 0;text-align:center;color:#5b74b8;font-size:14px}
+.q-imgwrap{margin:10px 0;text-align:center}
+.q-img{max-width:100%;border-radius:10px;border:1px solid #e3e8f4}
 .opts{margin-top:14px}
 .opt{display:flex;gap:10px;align-items:flex-start;background:#fff;border:2px solid transparent;border-radius:12px;padding:13px 14px;margin-bottom:10px;cursor:pointer;font-size:15px;line-height:1.6;box-shadow:0 1px 3px rgba(28,35,51,.05)}
 .opt .k{width:24px;height:24px;border-radius:50%;background:#eef1f7;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;margin-top:1px}
@@ -180,7 +189,17 @@ const DB = {
 let papers   = DB.get('papers', []);
 let sessions = DB.get('sessions', []);
 let wrongs   = DB.get('wrongs', []);
-let settings = DB.get('settings', { autoNext:true, timeLimit:150, seenGuide:false });
+let settings = DB.get('settings', { autoNext:true, timeLimit:150, seenGuide:false, ocrLevel:'fast' });
+// OCR 精度档位：fast 1.7MB（默认，够用） / std 20MB（更准） / best 12MB（最准但慢）
+const OCR_LEVELS = {
+  fast: { label:'快速', size:'约 1.7MB', path:'https://tessdata.projectnaptha.com/4.0.0_fast' },
+  std:  { label:'标准', size:'约 20MB',  path:'https://tessdata.projectnaptha.com/4.0.0' },
+  best: { label:'高精度', size:'约 12MB', path:'https://tessdata.projectnaptha.com/4.0.0_best' }
+};
+function ocrLangPath(){
+  const lv = OCR_LEVELS[settings.ocrLevel] || OCR_LEVELS.fast;
+  return lv.path;
+}
 function savePapers(){ DB.set('papers', papers); }
 function saveSessions(){ DB.set('sessions', sessions); }
 function saveWrongs(){ DB.set('wrongs', wrongs); }
@@ -254,19 +273,86 @@ function isNoiseLine(line){
   if(/^[(【(]?\s*(参考)?答案/.test(line) && /[A-H]/.test(line)) return true;
   if(/^[(【(]?\s*解析[】）):：]/.test(line)) return true;
   if(/^(参考答案|答案解析|试题解析)/.test(line)) return true;
+  if(isPageHeaderLine(line)) return true;   // 页眉/页脚/页码（PDF 每页重复）
+  if(isSectionHeaderLine(line)) return true; // 章节大标题/说明段
   return false;
 }
+// 页眉/页脚：如「津仕教育—2027 北京市选调公务员《综合能力测试》模拟卷二 获取更多资料，添加微信：xxx」「5」「第 5 页」「5 / 24」
+// 章节大标题（不是题型小标题，而是「四、数量关系。在这部分试题中，每道题……」这种带说明的段落）
+function isSectionHeaderLine(line){
+  const s = String(line).trim();
+  if(!s) return false;
+  // 形如「四、数量关系。在这部分试题中…」「五、判断推理。」
+  if(/^[一二三四五六七八九十]{1,2}\s*[、.．]\s*[^\s，。；]{1,12}[。．]/.test(s) && !/[A-H]\s*[．.、]/.test(s)) return true;
+  if(/在这部分试题中|每道题呈现一段|要求你迅速|请按每道题的要求作答|正确答案应与所给的陈述相符|这段陈述被假设是正确的|请开始答题|请仔细阅读/.test(s)) return true;
+  // 章节说明的续行残片（PDF 换行把一个说明句切成两半）
+  if(/^(段陈述|段文字|个选项|道题|答案|作答|题目|要求|说明|不需要任何附加说明)/.test(s) &&
+     /(陈述|答案|选项|作答|说明|推出|符合|正确|错误)/.test(s) && s.length <= 60) return true;
+  if(/正确的答案应与所给的陈述相符|不需要任何附加说明|陈述中直接推出|附加说明即可以/.test(s)) return true;
+  // PDF 断行把说明句切两半：「…可以从陈 / 述中直接推出。」
+  if(/^(述中直接推出|中直接推出|接推出|推出)[。．.]?$/.test(s)) return true;
+  // 章节说明的续行残片（如单独一行「答案。」）——无题号/选项标记的极短句
+  if(s.length <= 6 && /^(答案|作答|题目|要求|说明)[。．.]?$/.test(s)) return true;
+  return false;
+}
+// 两个单词型分数之间的「夹缝行」：如「1              3            4               1」（全是数字/空白/斜杠）
+function isFractionGapLine(line){
+  const s = String(line).trim();
+  if(!s) return false;
+  if(!/^[\d\s/／]+$/.test(s)) return false;
+  const toks = s.split(/\s+/).filter(Boolean);
+  return toks.length >= 2 && toks.every(t => /^\d+$/.test(t) || /^\d+\s*[/／]\s*\d+$/.test(t));
+}
+function isPageHeaderLine(line){
+  const s = String(line).trim();
+  if(/^\d{1,4}$/.test(s)) return true;                                  // 纯页码
+  if(/^第\s*\d{1,4}\s*页(\s*[/／]\s*\d{1,4}\s*页?)?$/.test(s)) return true;  // 第5页 / 第5页/共24页
+  if(/^\d{1,4}\s*[/／]\s*\d{1,4}$/.test(s)) return true;                // 5 / 24
+  if(/获取更多资料|添加微信|扫码关注|微信号|客服电话|咨询电话|更多资料|关注公众号/.test(s)) return true;
+  if(/模拟卷|模拟题|真题卷|试卷\d|第[一二三四五六七八九十]部分/.test(s)
+     && /(教育|公考|公务员|选调|培训|资料|微信)/.test(s)) return true;
+  return false;
+}
+// 材料题引导句：「阅读以下文字，完成 26~30 题」「根据以下材料，回答 26-30 题」→ {from:26,to:30}
+function materialHeaderRange(line){
+  const s = String(line).trim();
+  if(s.length > 60) return null;
+  if(!/^(阅读|根据|请看|结合)?\s*(以下|下列|下面|上述|这|本)?\s*(文字|材料|文段|短文|资料|图表|表格|图文|对话)/.test(s)) return null;
+  if(!/(完成|回答|解答|作答|做完)/.test(s)) return null;
+  const m = s.match(/(\d{1,3})\s*[-~～—–至到]\s*(\d{1,3})\s*题/) || s.match(/第\s*(\d{1,3})\s*[-~～—–至到]\s*(\d{1,3})\s*题/);
+  if(m){ const a = +m[1], b = +m[2]; if(a >= 1 && b >= a && b - a <= 40) return { from: a, to: b }; }
+  const m2 = s.match(/第?\s*(\d{1,3})\s*题/);
+  if(m2){ const n = +m2[1]; if(n >= 1 && n <= 500) return { from: n, to: n }; }
+  return null;
+}
+function isMaterialHeader(line){ return !!materialHeaderRange(line); }
+// 「下列/关于…说法正确的是」这类设问句：不应被拆成新题；且它是上一题的收尾（可能出现在题号行之前）
+function isStandalonePrompt(line){
+  const s = String(line).trim();
+  if(!s || s.length > 90) return false;
+  if(/^[A-H]\s*[．.、]/.test(s)) return false;
+  return /^[^，。；]{0,40}(下列|以下|关于|据此|由此|对该|这种|上述|该文|本文|这段话|这段文字)[^，。；]{0,30}(正确|错误|符合|不符合|最恰当|最合适|不正确|不恰当|理解|表述|说法|判断|推断|揭示|标题|主旨|意在|目的在于|接下来)/.test(s)
+      || /(说法|表述|判断|理解|标题|主旨|含义|意思)(正确|错误|有误|不正确|不恰当|最恰当|最合适)?的一项是/.test(s)
+      || /接下来(最可能|可能)?(讲述|论述|讨论|介绍)的是/.test(s);
+}
+function isOptionLine(line){ return /^[A-H]\s*[．.、]/.test(String(line).trim()); }
 // 章节标题识别：如「一、政治理论」「（一）图形推理」「第一部分 判断推理」→ 题型名；非标题返回 null
 function typeFromHeader(line){
-  if(!line || line.length > 30) return null;
-  const s = String(line).trim();
-  const s2 = s
+  if(!line) return null;
+  let s = String(line).trim();
+  if(s.length > 60) return null;
+  // 长说明句先截断到「首个句号前」再判定，如「（二）演绎推理。每道题给出一段陈述…」
+  const head = s.split(/[。．]/)[0].trim();
+  const cand = (head && head.length <= 30) ? head : s.slice(0, 30);
+  const s2 = cand
     .replace(/^[（(]\s*[一二三四五六七八九十\d]{1,3}\s*[）)]\s*/, '')
     .replace(/^[一二三四五六七八九十]{1,3}\s*[、.．:：]\s*/, '')
     .replace(/^第\s*[一二三四五六七八九十\d]{1,3}\s*(部分|章|节|篇)?\s*[、.．:：]?\s*/, '')
     .replace(/^\d{1,2}\s*[、.．]\s*/, '')
-    .replace(/[\s:：]+$/, '');
-  if(!s2 || s2 === s && !/^(图形推理|演绎推理|判断推理|科学推理|资料分析|数量关系|言语理解|常识判断|政治理论)/.test(s2)) {
+    .replace(/^([^\s:：。．，,]{2,10})\s*[:：].*$/, '$1')              // 「政治理论：根据题目要求…」→「政治理论」（冒号后的说明句切掉）
+    .replace(/[。．]\s*(在这部分试题中|请按每道题的要求作答|请开始答题|每道题).*$/, '')  // 去掉标题后的说明句
+    .replace(/[\s:：。．]+$/, '');
+  if(!s2 || s2 === cand && !/^(图形推理|演绎推理|判断推理|科学推理|资料分析|数量关系|言语理解|常识判断|政治理论)/.test(s2)) {
     // 无序号前缀时要求整行几乎是纯关键词
     if(!(s2.length <= 8 && /^(图形推理|演绎推理|判断推理|科学推理|科推|图推|资料分析|数量关系|言语理解|常识判断|政治理论)$/.test(s2))) return null;
   }
@@ -291,7 +377,7 @@ function typeFromHeader(line){
 }
 // 标题行深度解析：题型 + 标题里标注的题号范围（如「（一）图形推理（第36～40题）」→ {type,from:36,to:40}）
 function headerTypeRange(line){
-  if(!line || line.length > 40) return null;
+  if(!line || line.length > 120) return null;
   const type = typeFromHeader(line);
   if(!type) return null;
   const s = String(line).replace(/[，,\s　]/g, ' ');
@@ -309,11 +395,20 @@ function splitQuestions(lines){
   const blocks = []; let cur = null; let curType = null;
   const typeByNum = {}; // 标题里标注了题号范围（如「图形推理（第36～40题）」）→ 按题号精确归类
   const numRe = /^(\d{1,3})\s*[.．、]\s*(.+)$/;
+  const groupStack = [];   // 尚未定宿主题的材料组
+  const finishGroup = (grp, host) => { for(const g of grp.nums){ const b = blocks.find(x => x.num === g); if(b && b !== host){ b.belongsToMaterial = host.num; } } };
   for(const line of lines){
     const h = headerTypeRange(line);
     if(h){
       curType = h.type;
       if(h.from != null){ for(let n = h.from; n <= h.to; n++) typeByNum[n] = h.type; }
+      continue;
+    }
+    // 材料题引导句：「阅读以下文字，完成 26~30 题」→ 从它之后的内容归第一道材料题（可能跨页先出现）
+    const mh = materialHeaderRange(line);
+    if(mh){
+      cur = null;
+      groupStack.push({ from: mh.from, to: mh.to, nums: [], header: line.trim() });
       continue;
     }
     const m = line.match(numRe);
@@ -324,25 +419,159 @@ function splitQuestions(lines){
       else if(n === cur.num + 1){ ok = true; }
       else if(n > cur.num + 1 && n <= cur.num + 3 && !/^\d/.test(rest)){ ok = true; }
       else if(n > cur.num + 1 && typeByNum[n] && !/^\d/.test(rest)){ ok = true; }
-      if(ok){ cur = { num:n, lines:[rest], type: typeByNum[n] || curType }; blocks.push(cur); continue; }
+      if(!ok && !cur){ ok = n >= 1 && n <= 500 && typeByNum[n] && !/^\d+([.．]\d+)+/.test(rest); }
+      // 材料组内：题号落在 [from,to] 且与上一题连续 → 一定是新题
+      if(!ok && groupStack.length){
+        const g = groupStack[groupStack.length - 1];
+        if(n >= g.from && n <= g.to && (!cur || n === cur.num + 1 || n - (cur.num || 0) >= 1)) ok = true;
+      }
+      // 已知后续有材料题的题号（跨页场景）：仅当该题还没出现且当前没有更近的题
+      if(!ok && !cur && n >= 1 && n <= 500){
+        const g = groupStack.find(x => n >= x.from && n <= x.to);
+        if(g && !blocks.some(b => b.num === n)) ok = true;
+      }
+      if(ok){
+        cur = { num:n, lines:[rest], type: typeByNum[n] || curType };
+        blocks.push(cur);
+        if(groupStack.length){
+          const g = groupStack[groupStack.length - 1];
+          if(n >= g.from && n <= g.to){
+            g.nums.push(n);
+            if(g.host == null){ g.host = n; }   // 第一道组内题 = 材料宿主
+          }
+          if(n >= g.to){
+            const g2 = groupStack.pop();
+            const host = blocks.find(b => b.num === g2.host);
+            if(host && !host.material){
+              host.material = true; host.mFrom = g2.from; host.mTo = g2.to;
+              host.matText = [g2.header].concat(g2.pre || []).filter(Boolean).join('\n').trim();  // 材料正文与宿主题干分离
+              for(const b of blocks){
+                if(b !== host && b.num != null && b.num >= g2.from && b.num <= g2.to) b.belongsToMaterial = g2.host;
+              }
+            }
+          }
+        }
+        continue;
+      }
+      // 未被接纳为「题号行」→ 仍可能是正文里的数字，按正文处理
+    }
+    // 主设问句：「下列…正确的是」可能出现在题号行之前 → 收归上一题的正文/题干
+    if(cur && isStandalonePrompt(line)){
+      if(cur.lines.length && !isStandalonePrompt(cur.lines[cur.lines.length - 1]) && !isOptionLine(cur.lines[cur.lines.length - 1])) {
+        cur.lines.push(line);   // 已经是正文尾部，直接保留在主行
+      } else {
+        cur.lines.push(line);
+      }
+      continue;
+    }
+    if(line.trim() === '【图】'){   // 图片标记：就近归给上一题，不进入正文
+      if(blocks.length) blocks[blocks.length - 1].hasImage = true;
+      continue;
     }
     if(cur) cur.lines.push(line);
+    else if(groupStack.length && line.trim()){ /* 材料引导句之后的裸材料（尚未遇到题号）：挂在 pending 组 */ 
+      const g = groupStack[groupStack.length - 1]; (g.pre = g.pre || []).push(line);
+    }
+  }
+  // 若材料组在收尾时没有遇到 from..to 全部题号（跨页/题量不符），把已遇到的题归给第一个
+  while(groupStack.length){
+    const g = groupStack.pop();
+    const inGrp = blocks.filter(b => b.num != null && b.num >= g.from && b.num <= g.to);
+    if(inGrp.length){ const host = inGrp[0]; host.material = true; host.mFrom = g.from; host.mTo = g.to;
+      host.matText = [g.header].concat(g.pre || []).filter(Boolean).join('\n').trim();
+      for(const b of inGrp){ if(b !== host) b.belongsToMaterial = host.num; } }
+  }
+  tagMaterialBlocks(blocks, blocks.map(b => b.num));
+  return blocks;
+}
+// 给「材料题」区间打标：block.material=true 表示它的正文末尾挂着共享材料，需传给后续同组题
+function tagMaterialBlocks(blocks, seenNums){
+  if(!blocks.length) return blocks;
+  const nums = blocks.map(b => b.num).filter(n => n != null).sort((a,b)=>a-b);
+  for(const b of blocks){
+    if(b.num == null || b.material) continue;
+    const txt = b.lines.join('\n');
+    const m = txt.match(/(?:阅读|根据|结合)\s*(?:以下|下列|下面|上述)?\s*(?:文字|材料|文段|短文|资料|图表|表格|图文)/);
+    if(!m) continue;
+    const tail = txt.slice(m.index);
+    const mr = tail.match(/(?:完成|回答|解答|作答|做完)\s*第?\s*(\d{1,3})\s*[-~～—–至到]\s*(\d{1,3})\s*题/)
+            || tail.match(/(?:完成|回答|解答|作答|做完)\s*第?\s*(\d{1,3})\s*题/);
+    let from = null, to = null;
+    if(mr){ from = +mr[1]; to = +mr[2] || from; }
+    else {
+      // 「（第 X~Y 题）」也可能紧跟引导句之前
+      const head = txt.slice(0, m.index);
+      const hr = head.match(/第?\s*(\d{1,3})\s*[-~～—–至到]\s*(\d{1,3})\s*题/);
+      if(hr){ from = +hr[1]; to = +hr[2]; }
+    }
+    if(from == null){ from = b.num; to = b.num + 4; }
+    // 收敛到「已存在的、连续的题号」，避免把「下一章节的题」也吞进来
+    const grp = nums.filter(n => n >= from && n <= to);
+    const pick = grp.filter(n => n === from || grp.includes(n));
+    const realTo = pick.length ? pick[pick.length - 1] : from;
+    b.material = true; b.mFrom = from; b.mTo = realTo;
+    b.lines = b.lines.filter((ln, i) => !(i > 0 && /^(?:阅读|根据|结合)\s*(?:以下|下列|下面|上述)?\s*(?:文字|材料|文段|短文|资料|图表|表格|图文)/.test(String(ln).trim())));
+    for(const q of blocks){
+      if(q === b) continue;
+      if(q.num != null && q.num >= from && q.num <= realTo && q.num !== b.num) q.belongsToMaterial = b.num;
+    }
   }
   return blocks;
+}
+// 给一道题补挂「共享材料」（新材料题：材料在所有题号之后，需要回传给同组前面的题）
+function tagMaterialBeforeNums(blocks, from, to){
+  if(!blocks.length) return;
+  const nums = blocks.map(b => b.num).filter(n => n != null);
+  const grp = nums.filter(n => n >= from && n <= to && n < from); // none
+  // 找到第一道属于该组且带正文本体（非纯材料）的题，作为材料宿主
+  let host = null;
+  for(const b of blocks){ if(b.num != null && b.num >= from && b.num <= to){ host = b; break; } }
+  if(!host) return;
+  host.material = true; host.mFrom = from; host.mTo = to;
+  for(const b of blocks){
+    if(b === host || b.num == null) continue;
+    if(b.num >= from && b.num <= to) b.belongsToMaterial = host.num;
+  }
 }
 function parseBlock(block, ansMap){
   const buf = { stem: [] };
   LETTERS.forEach(l => buf[l] = []);
   let cur = 'stem';
   const push = (p, s) => { s = String(s == null ? '' : s).replace(/\s+$/,''); if(s.trim() !== '') buf[p].push(s.trim()); };
-  for(const raw of block.lines){
+  const rawLines = block.lines.slice();
+  for(let li = 0; li < rawLines.length; li++){
+    const raw = rawLines[li];
     const line = raw.replace(/[ \t]+$/, '');
-    const re = /([A-H])\s*[．.、]\s*/g;
+    // 情形B：夹缝行「1  3  4  1」+ 下一/两行给出标记「A. B. C. D.」与其后的分母「4 13 13 51」
+    //        → 还原为 A=1/4 B=3/13 C=4/13 D=1/51
+    if(isFractionGapLine(line)){
+      const nxt = (li + 1 < rawLines.length) ? rawLines[li + 1].trim() : '';
+      let denomLine = null, markerLine = null;
+      if(/^([A-H]\s*[．.、]\s*)+$/.test(nxt.replace(/\s+/g,' ').trim())){
+        markerLine = nxt; denomLine = (li + 2 < rawLines.length) ? rawLines[li + 2].trim() : null;
+      } else if(/^([A-H]\s*[．.、]\s*)+[\d\s/／]+$/.test(nxt)){
+        markerLine = nxt; denomLine = nxt.replace(/^([A-H]\s*[．.、]\s*)+/, '');
+      }
+      if(markerLine != null && denomLine != null){
+        const denoms = denomLine.split(/\s+/).filter(Boolean);
+        const nums = line.trim().split(/\s+/).filter(Boolean);
+        const fracs = fixFractionFromGap(nums, denoms);
+        if(fracs){
+          LETTERS.forEach((L, i) => { buf[L] = fracs[i] ? [fracs[i]] : []; });
+          cur = 'D'; li += (denomLine === nxt ? 1 : 2);   // 跳过已被消费的标记/分母行
+          continue;
+        }
+      }
+    }
+    // 选项字母必须处于「行首 / 全角空格 / 制表符 / 半角空白」之后，且紧跟 ．.、 分隔符
+    const re = /(^|[　\t]|\s)([A-H])\s*[．.、]\s*/g;
     const marks = []; let m;
     while((m = re.exec(line)) !== null){
-      const prevOk = m.index === 0 || /[\s　]/.test(line[m.index - 1]);
-      if(prevOk) marks.push({ L: m[1], start: m.index, end: m.index + m[0].length });
-      else re.lastIndex = m.index + 1;
+      const L = m[2];
+      const start = m.index + m[1].length;
+      const prev = start === 0 ? '' : line[start - 1];
+      if(prev && /[0-9A-Za-z\u4e00-\u9fff]/.test(prev)){ re.lastIndex = start + 1; continue; }
+      marks.push({ L, start, end: m.index + m[0].length });
     }
     if(marks.length === 0){ push(cur, line); continue; }
     push(cur, line.slice(0, marks[0].start));
@@ -353,17 +582,126 @@ function parseBlock(block, ansMap){
       push(cur, line.slice(marks[i].end, end));
     }
   }
+  mergeFractionOptions(buf);
+  // 分离「材料正文」：stem 中材料前缀（【材料】…）不并入普通题干
   const q = { id: uid('q'), stem: buf.stem.join('\n').trim(), options: {}, answer: ansMap[block.num] || '', type: block.type || '未分类' };
   LETTERS.forEach(l => { if(buf[l].length) q.options[l] = buf[l].join('\n').trim(); });
   if(!block.type && /根据以下(资料|材料|文字)|根据下列(资料|材料|文字|表格)|根据下(表|图)/.test(q.stem)) q.type = '资料分析';
+  if(block.material){ q.isMaterial = true; q.mFrom = block.mFrom; q.mTo = block.mTo; q.material = block.matText || ''; }
+  if(block.hasImage){ q.hasImage = true; if(!q.imageData) q.needsImage = true; }
+  if(block.belongsToMaterial != null){ q.belongsToMaterial = block.belongsToMaterial; }
   return q;
+}
+// 分数选项修复：
+//  - 情形A（分子分母各占一视觉行，DD 相邻）：buf[i]=["4"], buf[i+1]=["13"] → ["4/13"]
+//  - 情形B（分数线被当成分隔线，分子一行在前、分母挤在 D 一格里）：见 fixFractionFromGap
+function mergeFractionOptions(buf){ mergeFractionOptionsImpl(buf); }
+function mergeFractionOptionsImpl(buf){
+  const fracf = s => /^\d+\s*[\/／]\s*\d+$/.test(String(s).trim().replace(/\s+/g,''));
+  LETTERS.forEach(l => {
+    if(!buf[l] || !buf[l].length) return;
+    const parts = [];
+    for(const seg of buf[l]){
+      const s = String(seg).trim();
+      if(!s) continue;
+      const sub = s.split(/\s+/).filter(Boolean);
+      if(sub.length > 1 && sub.every(fracf)) sub.forEach(x => parts.push(x.replace(/\s+/g,'')));
+      else parts.push(s);
+    }
+    for(let i = 0; i < parts.length - 1; i++){
+      if(/^\d+$/.test(parts[i]) && /^\d+$/.test(parts[i+1])){ parts[i] = parts[i] + '/' + parts[i+1]; parts.splice(i+1, 1); i--; }
+    }
+    buf[l] = parts.filter(Boolean);
+  });
+}
+// 从「夹缝行」推断分数：gap 行给出各分量（如 1 3 4 1），D 格给出分母（4 13 13 51）
+// 按序号配对 → A=1/4 B=3/13 C=4/13 D=1/51；写回 ABC（D 若已被占则顺延）
+function fixFractionFromGap(stemNums, denomNums){
+  if(!stemNums || !denomNums || !stemNums.length || stemNums.length !== denomNums.length) return null;
+  const fracs = stemNums.map((n, i) => n + '/' + denomNums[i]);
+  return fracs;
 }
 function parseTextToQuestions(text){
   const rawLines = String(text).split(/\r?\n/).map(l => l.replace(/\u00a0/g,' ').trim()).filter(l => l !== '');
   const ansMap = extractAnswers(rawLines);
-  const lines = rawLines.filter(l => !isNoiseLine(l));
+  // 章节/题型小标题即使被判为「噪声」也要先把题型登记下来，再丢弃其正文
+  const lines = [];
+  for(const l of rawLines){
+    const h = headerTypeRange(l);
+    if(h){ lines.push(l); continue; }     // 让 splitQuestions 处理标题（登记题型）
+    if(isNoiseLine(l)) continue;
+    lines.push(l);
+  }
   const blocks = splitQuestions(lines);
-  return blocks.map(b => parseBlock(b, ansMap));
+  const qs = blocks.map(b => parseBlock(b, ansMap));
+  propagateMaterial(blocks, qs);
+  return qs;
+}
+// 把材料块的「材料正文」复制到同组每道题的题干前部；宿主题去掉尾部材料
+function propagateMaterial(blocks, qs){
+  for(let i = 0; i < blocks.length; i++){
+    const b = blocks[i];
+    if(!b.material || b.mFrom == null) continue;
+    const q = qs[i];
+    if(!q) continue;
+    const mat = String(b.matText || '').trim();
+    if(!mat) continue;
+    q.material = mat;
+    for(let j = 0; j < qs.length; j++){
+      const nb = blocks[j];
+      if(!nb || nb.num == null || j === i) continue;
+      if(nb.num < b.mFrom || nb.num > b.mTo) continue;
+      const nq = qs[j]; if(!nq) continue;
+      nq.material = mat;
+    }
+  }
+}
+function stripMaterialFromStem(stem, mat){
+  let s = String(stem || '');
+  s = s.replace(mat, '');
+  s = s.replace(/^【材料】\s*/,'');
+  return s.replace(/\n{3,}/g, '\n\n').trim();
+}
+// 从题干里切出「材料正文」：引导句之后、到本组第一道题的设问句之前的那一段
+function extractMaterialText(stem){
+  const s = String(stem || '').replace(/^【材料】\s*/,'');
+  const mi = s.search(/(?:阅读|根据|结合)\s*(?:以下|下列|下面|上述)?\s*(?:文字|材料|文段|短文|资料|图表|表格|图文)/);
+  if(mi < 0) return '';
+  const after = s.slice(mi);
+  // 材料从引导句开始，到「本组题号行/设问句」结束；这里只能拿到宿主题自己的题干，
+  // 因此：从引导句起，剥离「完成 X~Y 题」标记后即为材料
+  const cut = after.search(/(?:完成|回答|解答|作答|做完)\s*第?\s*\d{1,3}\s*[-~～—–至到]?\s*\d{0,3}\s*题/);
+  let body = cut >= 0 ? after.slice(after.indexOf('题', cut) + 1) : after;
+  return body.trim();
+}
+// 材料题共享材料的展示片段（题干上方，可折叠）
+function materialHTML(q){
+  const mat = q && q.material ? String(q.material).trim() : '';
+  if(!mat) return '';
+  return `<details class="q-material" open><summary>📄 材料（第 ${q.mFrom || '?'}~${q.mTo || '?'} 题共用）</summary><div class="q-material-body">${esc(mat)}</div></details>`;
+}
+// 图形题：题干下方的图片占位提示（PDF 图片无法自动提取）
+function imagePlaceholderHTML(q){
+  if(!q) return '';
+  if(q.imageData) return `<div class="q-imgwrap"><img src="${q.imageData}" alt="原题图片" class="q-img"></div>`;
+  const stem = String(q.stem || '');
+  const isGraphic = q.needsImage || q.type === '图形推理' || /图形|下图|所给.*选项.*填入|拼(出|成)|图1|图2/.test(stem + ' ' + JSON.stringify(q.options || {}));
+  if(!isGraphic) return '';
+  return `<div class="q-imgmiss">🖼 本题含图，PDF 未能自动提取图片<br><span style="font-size:12px">可在「编辑」里补充图片，或对照原卷作答</span></div>`;
+}
+// 编辑材料时，同步更新同组所有题（材料是共享的）
+function setMaterialForGroup(q, text){
+  const from = q.mFrom, to = q.mTo;
+  if(from == null || to == null){ q.material = text; return; }
+  if(!state.imp || !state.imp.questions) return;
+  state.imp.questions.forEach(x => { if(x.mFrom === from && x.mTo === to) x.material = text; });
+}
+// 给题目附图片（转 dataURL 存入题目，随试卷一起保存）
+function attachQuestionImage(q, file){
+  const r = new FileReader();
+  r.onload = () => { q.imageData = String(r.result); q.hasImage = true; toast('已附加图片'); render(); };
+  r.onerror = () => toast('图片读取失败');
+  r.readAsDataURL(file);
 }
 // 纯答案文本 → 空答题卡（无题干，按题号填答案），用于"只有答案 PDF/文本"场景
 function buildAnswerOnlyQuestions(ansMap){
@@ -751,39 +1089,167 @@ function qTimeDisplay(s, qid, shownAt, now, isCurrent){
 //CORE>>>
 
 // ---------- PDF 解析 ----------
+// 文字版：pdf.js getTextContent（按行聚合）
+// 扫描/图片版：pdf.js 渲染成 canvas → tesseract.js 中文 OCR → 输出同格式文本，复用同一套解析器
+const OCR_LANG = 'chi_sim';
+let _tessPromise = null, _ocrWorker = null, _ocrWorkerLevel = null, _ocrBusy = false;
+
+// OCR 引擎懒加载：只有真遇到扫描版 PDF 才下载（约 66KB）
+function loadTesseract(){
+  if(window.Tesseract) return Promise.resolve(window.Tesseract);
+  if(_tessPromise) return _tessPromise;
+  _tessPromise = new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+    s.onload = () => window.Tesseract ? res(window.Tesseract) : rej(new Error('OCR 引擎加载失败'));
+    s.onerror = () => { _tessPromise = null; rej(new Error('OCR 引擎加载失败（需联网下载），请改用「粘贴文本」')); };
+    document.head.appendChild(s);
+  });
+  return _tessPromise;
+}
+// 把 PDF 页渲染成 canvas（OCR 用）：放大 2 倍提升识别率，先铺白底防透明
+async function renderPageCanvas(page, scale){
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const viewport = page.getViewport({ scale: scale * dpr });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.floor(viewport.width));
+  canvas.height = Math.max(1, Math.floor(viewport.height));
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas;
+}
+// 复用同一个 worker 识别多页（避免反复初始化）；切换精度档位时重建 worker
+async function ocrRecognize(canvas){
+  const T = await loadTesseract();
+  const level = settings.ocrLevel || 'fast';
+  if(!_ocrWorker || _ocrWorkerLevel !== level){
+    releaseOcrWorker();
+    _ocrWorker = await T.createWorker(OCR_LANG, 1, {
+      langPath: ocrLangPath(),
+      gzip: true,
+      logger: () => {}
+    });
+    _ocrWorkerLevel = level;
+  }
+  const r = await _ocrWorker.recognize(canvas);
+  return (r && r.data && r.data.text) ? r.data.text : '';
+}
+function releaseOcrWorker(){
+  if(_ocrWorker){ try{ _ocrWorker.terminate(); }catch(e){} _ocrWorker = null; _ocrWorkerLevel = null; }
+}
+
+// 把 pdf.js 的一堆文本片段按「行」聚合（按 y 归行，按 x 排序，间距>6 补空格）
+function pdfPageToLines(tc){
+  const rows = [];
+  for(const it of tc.items){
+    if(!it.str || !it.str.trim()) continue;
+    const x = it.transform[4], y = it.transform[5];
+    let row = null;
+    for(const r of rows){ if(Math.abs(r.y - y) <= 2.5){ row = r; break; } }
+    if(!row){ row = { y, items: [] }; rows.push(row); }
+    row.items.push({ x, s: it.str, w: it.width, y });
+  }
+  rows.sort((a, b) => b.y - a.y);
+  const lines = [];
+  for(const r of rows){
+    r.items.sort((a, b) => a.x - b.x);
+    let line = '', lastEnd = null;
+    for(const it of r.items){
+      if(lastEnd !== null && it.x - lastEnd > 6 && !/\s$/.test(line)) line += ' ';
+      line += it.s;
+      lastEnd = it.x + (it.w || 0);
+    }
+    const t = line.trim();
+    if(t) lines.push(t);
+  }
+  return lines;
+}
+// 统计本页绘制了多少张位图（用于判断是否扫描版，以及原「含图」提示）
+async function pdfPageImageCount(page){
+  try{
+    const ops = await page.getOperatorList();
+    const a = (pdfjsLib.OPS && pdfjsLib.OPS.paintImageXObject) || 85;
+    const b = (pdfjsLib.OPS && pdfjsLib.OPS.paintJpegXObject) || 82;
+    let n = 0;
+    for(let i = 0; i < ops.fnArray.length; i++){ if(ops.fnArray[i] === a || ops.fnArray[i] === b) n++; }
+    return n;
+  }catch(e){ return 0; }
+}
+// OCR 结果 → 行数组（去掉纯空白行）
+function ocrTextToLines(text){
+  return String(text || '').split(/\r?\n/).map(s => s.replace(/\s+$/, '')).filter(s => s.trim());
+}
+
 async function extractTextFromPDF(file, onProgress){
   if(typeof pdfjsLib === 'undefined') throw new Error('PDF 引擎未加载（需联网），请改用「粘贴文本」');
   pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   const buf = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
-  const out = [];
+  // 第一遍：逐页取文字层 + 位图数，判断哪些页是「扫描页」（基本无文字）
+  const pages = [];
+  const noTextPages = [];
   for(let p = 1; p <= pdf.numPages; p++){
-    if(onProgress) onProgress(p, pdf.numPages);
+    if(onProgress) onProgress(p, pdf.numPages, 'text');
     const page = await pdf.getPage(p);
-    const tc = await page.getTextContent();
-    const rows = [];
-    for(const it of tc.items){
-      if(!it.str || !it.str.trim()) continue;
-      const x = it.transform[4], y = it.transform[5];
-      let row = null;
-      for(const r of rows){ if(Math.abs(r.y - y) <= 2.5){ row = r; break; } }
-      if(!row){ row = { y, items: [] }; rows.push(row); }
-      row.items.push({ x, s: it.str, w: it.width });
+    const imgCount = await pdfPageImageCount(page);
+    let lines = [];
+    try{ lines = pdfPageToLines(await page.getTextContent()); }catch(e){ lines = []; }
+    const textLen = lines.join('').length;
+    // 无文字层（或只有页码/页眉一两个字）→ 候选扫描页
+    const noText = textLen < 15;
+    pages.push({ no: p, page, lines, imgCount, noText });
+    if(noText) noTextPages.push(p);
+  }
+  // 判定哪些候选页真的要走 OCR。
+  // 关键：不能见「无文字页」就 OCR——文字版 PDF 里常有个别纯图页（封面/密封线/大幅插图），
+  // 逐个 OCR 既慢又会灌入噪声。只有「无文字页占比高」才认定整份是扫描版；
+  // 也可勾选「强制识别所有页」手动覆盖。
+  const forceOcr = !!(state.imp && state.imp.forceOcr);
+  const minNoText = Math.max(2, Math.ceil(pages.length * 0.3));
+  const isScannedDoc = noTextPages.length >= minNoText;
+  const needOcr = forceOcr
+    ? pages.filter(p => p.imgCount > 0 || p.noText).map(p => p.no)
+    : (isScannedDoc ? noTextPages.slice() : []);
+  const skippedFigPages = (!forceOcr && !isScannedDoc) ? noTextPages.length : 0;
+  // 第二遍：扫描页走 OCR（文字版 PDF 完全不走这条路，零额外开销）
+  for(let i = 0; i < needOcr.length; i++){
+    const no = needOcr[i];
+    const pg = pages[no - 1];
+    if(onProgress) onProgress(i + 1, needOcr.length, 'ocr');
+    try{
+      const canvas = await renderPageCanvas(pg.page, 2);
+      const text = await ocrRecognize(canvas);
+      pg.ocrLines = ocrTextToLines(text);
+      pg.ocrFailed = false;
+    }catch(e){
+      pg.ocrLines = [];
+      pg.ocrFailed = true;
+      pg.ocrErr = e && e.message ? e.message : String(e);
     }
-    rows.sort((a, b) => b.y - a.y);
-    for(const r of rows){
-      r.items.sort((a, b) => a.x - b.x);
-      let line = '', lastEnd = null;
-      for(const it of r.items){
-        if(lastEnd !== null && it.x - lastEnd > 6 && !/\s$/.test(line)) line += ' ';
-        line += it.s;
-        lastEnd = it.x + (it.w || 0);
-      }
-      const t = line.trim();
-      if(t) out.push(t);
+  }
+  releaseOcrWorker();
+  // 汇总：保持页序，扫描页用 OCR 文本，并在页尾保留「含图」标记
+  const out = [];
+  let ocrOk = 0, ocrFail = 0;
+  for(const pg of pages){
+    if(needOcr.indexOf(pg.no) >= 0){
+      if(pg.ocrLines && pg.ocrLines.length){ out.push(...pg.ocrLines); ocrOk++; }
+      else if(pg.ocrFailed) ocrFail++;
+      // 扫描页整页就是一张图：不再打「含图」标记（否则每道题都会提示含图）
+    }else{
+      out.push(...pg.lines);
+      if(pg.imgCount > 0) out.push('【图】');
     }
     out.push('');
   }
+  if(skippedFigPages && skippedFigPages <= 3) toast(`已按文字版处理（跳过 ${skippedFigPages} 个无文字页，如图片页/封面；如需识别可勾选「强制识别所有页」）`);
+  if(needOcr.length && ocrFail === needOcr.length){
+    const first = pages.find(p => p.scanned && p.ocrFailed);
+    throw new Error('扫描版 PDF 识别失败：' + (first && first.ocrErr ? first.ocrErr : 'OCR 服务不可用') + '（需联网下载中文识别包），请改用「粘贴文本」');
+  }
+  if(ocrFail) toast(`⚠️ ${ocrFail} 页扫描识别失败，其余 ${ocrOk} 页已识别，请校对`);
   return out.join('\n');
 }
 
@@ -841,6 +1307,7 @@ function viewLibrary(){
       <h3 style="color:#fff">👋 京选刷题 · 两种用法</h3>
       <div style="font-size:13.5px;line-height:1.85">
       📘 <b>完整录入</b>：粘贴/PDF上传题目文本（题干+选项+答案），粉笔式刷题界面<br>
+      🖍 <b>扫描/拍照版 PDF 也能用</b>：自动 OCR 识别（首次需联网下载中文识别包）<br>
       🗂 <b>快速建卡</b>：一键生成北京选调65题标准结构卡（题型已分配），只填答案即可<br>
       两种模式可混用：没录题干的题自动显示为纯字母涂卡<br>
       <span style="opacity:.85">每题自动计时 · 题型得分率诊断 · 数据本地保存</span></div>
@@ -898,11 +1365,14 @@ function viewImport(){
   let html = `<header class="appbar"><div class="title"><span class="backlink" data-act="import-exit">‹ 返回</span>　完整录入</div><div class="sub">${imp.step===0?'第一步：来源':'第二步：校对'}</div></header><main>`;
   if(imp.step === 0){
     html += `<div class="card"><h3>📄 方式一：上传 PDF 试卷</h3>
-      <div class="muted" style="margin-bottom:10px">文字版 PDF（含题干、选项、末尾答案页效果最佳）。扫描图片版无法识别。也支持纯答案的 PDF（只提取答案建卡）。</div>
+      <div class="muted" style="margin-bottom:10px">文字版 PDF 直接提取文字；<b>扫描/拍照版 PDF 自动 OCR 识别</b>（含题干、选项、末尾答案页效果最佳）。也支持纯答案的 PDF（只提取答案建卡）。</div>
       <input type="file" id="pdfFile" accept="application/pdf" style="width:100%">
-      <div id="pdfStatus" class="muted" style="margin-top:8px"></div></div>
+      <div id="pdfStatus" class="muted" style="margin-top:8px"></div>
+      <label style="display:flex;align-items:center;gap:7px;margin-top:10px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="forceOcrBox"> 强制识别所有页（文字版混排/识别不全时勾选，会明显变慢）</label>
+      <div class="muted" style="margin-top:8px;font-size:12px;line-height:1.7">🖍 扫描版说明：识别在本机浏览器内完成，不上传题目；<b>首次</b>需联网下载中文识别包（默认约 1.7MB，之后可离线用）。一页约 3～10 秒，请耐心等待，识别后务必校对一遍。</div></div>
       <div class="card"><h3>📄 上传答案 PDF（可选，答案分册时用）</h3>
-      <div class="muted" style="margin-bottom:10px">答案单独成册时先传这里暂存，解析出试卷后会按题号自动填入；只传答案 PDF 也可以（自动建空答题卡）。</div>
+      <div class="muted" style="margin-bottom:10px">答案单独成册时先传这里暂存，解析出试卷后会按题号自动填入；只传答案 PDF 也可以（自动建空答题卡）。文字版与扫描版均可识别。</div>
       <input type="file" id="ansPdfFile0" accept="application/pdf" style="width:100%">
       <div id="ansPdfStatus0" class="muted" style="margin-top:8px"></div></div>
       <div class="card"><h3>📝 方式二：粘贴题目文本</h3>
@@ -917,7 +1387,7 @@ function viewImport(){
       <div class="muted" style="margin-bottom:10px;font-size:12.5px">标准 65 题结构：政治理论10 · 常识判断10 · 言语理解10 · 数量关系5 · 图形推理5 · 逻辑判断10 · 科学推理5 · 资料分析10</div>
       <div class="row"><input type="number" id="btFrom" placeholder="起" style="width:70px" min="1"><span class="muted">至</span><input type="number" id="btTo" placeholder="止" style="width:70px" min="1"><select id="btType" class="grow">${DEFAULT_TYPES.map(t=>`<option>${t}</option>`).join('')}</select><button class="btn btn-sm btn-primary" data-act="batch-type">应用</button></div></div>
       <div class="card"><h3>⚡ 批量录入/修正答案</h3>
-      <div class="muted" style="margin-bottom:8px">📄 <b>上传答案 PDF</b>（试卷与答案分册时用）：解析后按题号自动填入</div>
+      <div class="muted" style="margin-bottom:8px">📄 <b>上传答案 PDF</b>（试卷与答案分册时用）：解析后按题号自动填入，文字版/扫描版均可</div>
       <input type="file" id="ansPdfFile" accept="application/pdf" style="width:100%">
       <div id="ansPdfStatus" class="muted" style="margin:8px 0"></div>
       <textarea id="ansText" rows="2" placeholder="也可以直接粘贴，如：1-5 BADCB 换行 11.B 12.D"></textarea>
@@ -929,6 +1399,9 @@ function viewImport(){
         <select data-act="q-ans" data-qid="${q.id}">${ansOptions(q.answer)}</select>
         <button class="del-x" data-act="q-del" data-qid="${q.id}">✕</button></div>
         <textarea rows="2" data-act="q-stem" data-qid="${q.id}" placeholder="题干（留空则作答时只显示字母涂卡）">${esc(q.stem)}</textarea>
+        ${q.material ? `<details class="q-material" style="margin:6px 0"><summary>📄 共用材料（第 ${q.mFrom||'?'}~${q.mTo||'?'} 题）· 点开展开编辑</summary><textarea rows="4" data-act="q-material" data-qid="${q.id}" style="margin-top:6px;width:100%">${esc(q.material)}</textarea></details>` : ''}
+        ${q.type === '图形推理' || /图形|下图|拼(出|成)/.test((q.stem||'')+JSON.stringify(q.options||{})) ? `<div class="q-imgmiss" style="margin:6px 0">🖼 本题含图（PDF 未能自动提取）。可点下方按钮插入图片：</div>
+          <div class="row" style="margin-bottom:6px"><input type="file" accept="image/*" data-act="q-img" data-qid="${q.id}" style="font-size:12px"></div>` : ''}
         ${keys.map(k => `<div class="oedit"><span class="k">${k}</span><textarea rows="1" data-act="q-opt" data-qid="${q.id}" data-key="${k}" placeholder="选项${k}内容（可留空）">${esc(q.options[k])}</textarea><button class="del-x" data-act="q-opt-del" data-qid="${q.id}" data-key="${k}">✕</button></div>`).join('')}
         ${keys.length < 8 ? `<button class="btn btn-sm" data-act="q-opt-add" data-qid="${q.id}">＋ 添加选项</button>` : ''}
         </div>`;
@@ -986,9 +1459,14 @@ function parseTextEntry(text, nameFallback){
 async function handlePDFFile(input){
   const f = input.files && input.files[0]; if(!f) return;
   const st = $('#pdfStatus');
+  if(state.imp) state.imp.forceOcr = !!($('#forceOcrBox') && $('#forceOcrBox').checked);
   try{
     st.textContent = '正在解析 PDF，请稍候…';
-    const text = await extractTextFromPDF(f, (p, n) => { st.textContent = `正在解析第 ${p}/${n} 页…`; });
+    const text = await extractTextFromPDF(f, (p, n, phase) => {
+      st.textContent = phase === 'ocr'
+        ? `扫描页识别中 ${p}/${n} 页…（首次需下载中文识别包，请稍候）`
+        : `正在解析第 ${p}/${n} 页…`;
+    });
     if(!text.trim()) throw new Error('未提取到文字，可能是扫描图片版 PDF');
     parseTextEntry(text, f.name.replace(/\.pdf$/i, ''));
   }catch(e){ st.textContent = '⚠️ ' + e.message; }
@@ -999,7 +1477,11 @@ async function handleAnsPDFFile0(input){
   const st = $('#ansPdfStatus0');
   try{
     st.textContent = '正在解析答案 PDF…';
-    const text = await extractTextFromPDF(f, (p, n) => { st.textContent = `正在解析答案 PDF 第 ${p}/${n} 页…`; });
+    const text = await extractTextFromPDF(f, (p, n, phase) => {
+      st.textContent = phase === 'ocr'
+        ? `扫描页识别中 ${p}/${n} 页…（首次需下载中文识别包，请稍候）`
+        : `正在解析答案 PDF 第 ${p}/${n} 页…`;
+    });
     if(!text.trim()) throw new Error('未提取到文字，可能是扫描图片版 PDF');
     const { count } = parseAnswerText(text, 500);
     if(!count) throw new Error('未解析出答案（需要形如 1-5 BADCB 或 11.B 的答案行）');
@@ -1015,7 +1497,11 @@ async function handleAnsPDFFile(input){
   const st = $('#ansPdfStatus');
   try{
     st.textContent = '正在解析答案 PDF…';
-    const text = await extractTextFromPDF(f, (p, n) => { st.textContent = `正在解析答案 PDF 第 ${p}/${n} 页…`; });
+    const text = await extractTextFromPDF(f, (p, n, phase) => {
+      st.textContent = phase === 'ocr'
+        ? `扫描页识别中 ${p}/${n} 页…（首次需下载中文识别包，请稍候）`
+        : `正在解析答案 PDF 第 ${p}/${n} 页…`;
+    });
     if(!text.trim()) throw new Error('未提取到文字，可能是扫描图片版 PDF');
     const { map, count } = parseAnswerText(text, imp.questions.length);
     if(!count) throw new Error('未解析出答案（需要形如 1-5 BADCB 或 11.B 的答案行）');
@@ -1319,7 +1805,9 @@ function viewQuizRun(){
   let body = '';
   if(rich){
     body = `<div class="q-num">${esc(s.mode === 'special' ? '专项练习' : s.paperName)} · 第 ${q.pos + 1} 题 ${question.answer ? '' : '<span class="tag red">未设答案，不计分</span>'}</div>
+      ${materialHTML(question)}
       <div class="q-stem">${esc(question.stem) || '<span class="muted">（本题未录题干）</span>'}</div>
+      ${imagePlaceholderHTML(question)}
       <div class="opts">${keys.map(k => `<div class="opt ${a && a.choice === k ? 'sel' : ''}" data-act="pick" data-key="${k}"><span class="k">${k}</span><span>${esc(question.options[k] || '')}</span></div>`).join('')}</div>
       ${qTimeRow}`;
   } else {
@@ -1502,7 +1990,9 @@ function viewWrongRedo(){
   let body;
   if(rich){
     body = `<div class="q-num">来自「${esc(w.paperName)}」</div>
+      ${materialHTML(w.q)}
       <div class="q-stem">${esc(w.q.stem) || '<span class="muted">（未录题干）</span>'}</div>
+      ${imagePlaceholderHTML(w.q)}
       <div class="opts">${keys.map(k => `<div class="opt" data-act="wrong-pick" data-key="${k}"><span class="k">${k}</span><span>${esc(w.q.options[k] || '')}</span></div>`).join('')}</div>`;
   } else {
     body = `<div class="q-num" style="text-align:center">来自「${esc(w.paperName)}」</div>
@@ -1545,6 +2035,15 @@ function viewMine(){
     <div class="card"><h3>⚙️ 默认设置</h3>
     <div class="setrow"><span>答完自动下一题</span><label class="switch"><input type="checkbox" data-act="set-auto-next" ${settings.autoNext?'checked':''}><i></i></label></div>
     <div class="setrow"><span>默认限时（分钟）</span><input type="number" min="0" value="${settings.timeLimit || 0}" style="width:90px" data-act="set-timelimit"></div></div>
+    <div class="card"><h3>🖍 扫描版 PDF 识别精度</h3>
+    <div class="muted" style="margin-bottom:10px;font-size:12.5px;line-height:1.7">上传扫描/拍照版 PDF 时自动在本机做 OCR。档位越高越准、越慢，识别包只下载一次（之后离线可用）。</div>
+    <div class="setrow"><span>精度档位</span>
+      <select data-act="set-ocr-level" style="width:150px">
+        <option value="fast" ${settings.ocrLevel==='fast'?'selected':''}>快速（1.7MB）</option>
+        <option value="std" ${settings.ocrLevel==='std'?'selected':''}>标准（20MB）</option>
+        <option value="best" ${settings.ocrLevel==='best'?'selected':''}>高精度（12MB）</option>
+      </select></div>
+    <div class="muted" style="font-size:12px;line-height:1.7">当前：<b>${(OCR_LEVELS[settings.ocrLevel]||OCR_LEVELS.fast).label}</b>，首次需下载 ${(OCR_LEVELS[settings.ocrLevel]||OCR_LEVELS.fast).size} 中文识别包。扫描件模糊、倾斜时建议先用「快速」试，识别不准再升「标准」。</div></div>
     <div class="card"><h3>💾 数据管理</h3>
     <div class="row" style="flex-wrap:wrap">
       <button class="btn" data-act="export-data">导出备份(JSON)</button>
@@ -1660,9 +2159,18 @@ function viewMine(){
     题型得分率低于 60% → 标「需提高准确率」；题型平均用时超过全卷均值 20% → 标「需提高速度」；单题用时超均值 50% → 明细标「慢」。双差题型优先专项练习（刷题页可选按题型专项）。</div></details>
     <details class="fold"><summary>判断推理能细分统计吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     能。题型列表已细分出「图形推理」「逻辑判断（即演绎推理）」「科学推理」（三类独立计时计分），「判断推理」保留给类比/定义等。批量设置题型、单题编辑下拉、专项练习勾选、报告统计均已细分（校对页保留人工修正）。粘贴/PDF 文本里的章节小标题会自动识别归类：普通标题（如「二、判断推理」「（一）图形推理」）后的题依次归类；标题里标了题号范围的（如「图形推理（第36～40题）」「逻辑判断（第41-50题）」）会按题号精确标识到每一题。</div></details>
+    <details class="fold"><summary>扫描/拍照版的 PDF 能识别吗？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
+    <b>能。</b>上传后会自动判断每一页有没有文字层：文字版走 PDF 文字提取（秒出）；<b>扫描/拍照版自动切到浏览器内 OCR</b>（tesseract.js + 中文识别包），不需要任何服务器，题目不会离开你的设备。<br><br>
+    <b>几点要知道：</b><br>
+    ① <b>首次</b>要联网下载中文识别包（约 1MB），下载完后<b>离线也能用</b>（和 App 其他资源一样被缓存）；<br>
+    ② 速度约<b>一页 3～10 秒</b>（取决于手机/电脑性能和扫描清晰度），页面会显示「扫描页识别中 x/y 页」；<br>
+    ③ 识别在<b>本机</b>完成，不上传原卷；<br>
+    ④ 识别后务必进第二步<b>校对</b>——OCR 对模糊、倾斜、手写、带表格/公式的页面会出错，尤其是<b>图形推理的图</b>（图上的字OCR意义不大，且原图不会自动嵌入，需手动插图）；<br>
+    ⑤ 清晰度建议：<b>300dpi 左右的灰度/黑白扫描</b>效果最好；拍照请正对、光线匀、页面占满画面；<br>
+    ⑥ 文字版和扫描版<b>混在一份 PDF 里也支持</b>——逐页自动判断，哪页没文字层就 OCR 哪页。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
-    四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。答案 PDF 需为文字版，扫描图片版无法识别。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.7 · 支持坚果云/GitHub/Gitee 云同步</div>`;
+    四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。<b>扫描/拍照版 PDF 也能识别</b>——自动走浏览器内 OCR（首次需联网下载中文识别包约 1MB，之后可离线用），一页约 3～10 秒，识别后请校对。</div></details></div>
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.8 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
@@ -1973,10 +2481,20 @@ document.addEventListener('change', e => {
     if(act === 'q-type'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q) q.type = el.value; }
     else if(act === 'q-ans'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q) q.answer = el.value; }
     else if(act === 'q-stem'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q) q.stem = el.value; }
+    else if(act === 'q-material'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q) setMaterialForGroup(q, el.value); }
+    else if(act === 'q-img'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q && el.files && el.files[0]) attachQuestionImage(q, el.files[0]); }
     else if(act === 'q-opt'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q) q.options[el.dataset.key] = el.value; }
   }
   if(act === 'set-auto-next'){ settings.autoNext = el.checked; saveSettings(); }
   else if(act === 'set-timelimit'){ settings.timeLimit = Math.max(0, +el.value || 0); saveSettings(); }
+  else if(act === 'set-ocr-level'){
+    const v = el.value;
+    if(OCR_LEVELS[v] && v !== settings.ocrLevel){
+      settings.ocrLevel = v; saveSettings();
+      releaseOcrWorker();   // 切换档位必须重建 worker，下次识别才会用新模型
+      toast(`已切换识别精度：${OCR_LEVELS[v].label}（下次识别时下载 ${OCR_LEVELS[v].size} 识别包）`);
+    }
+  }
   else if(act === 'import-data'){ if(el.files && el.files[0]) importData(el.files[0]); el.value = ''; }
   else if(act === 'wrong-show-resolved'){ state.wrongShowResolved = el.checked; render(); }
   else if(act === 'sync-owner'){ sync.owner = el.value.trim(); saveSync(); }
