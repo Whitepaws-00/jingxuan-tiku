@@ -192,13 +192,20 @@ let wrongs   = DB.get('wrongs', []);
 let settings = DB.get('settings', { autoNext:true, timeLimit:150, seenGuide:false, ocrLevel:'fast' });
 // OCR 精度档位：fast 1.7MB（默认，够用） / std 20MB（更准） / best 12MB（最准但慢）
 const OCR_LEVELS = {
-  fast: { label:'快速', size:'约 1.7MB', path:'https://tessdata.projectnaptha.com/4.0.0_fast' },
+  fast: { label:'快速', size:'约 1.7MB', path:'' },  // fast 档语言包随应用自托管，路径运行时计算
   std:  { label:'标准', size:'约 20MB',  path:'https://tessdata.projectnaptha.com/4.0.0' },
   best: { label:'高精度', size:'约 12MB', path:'https://tessdata.projectnaptha.com/4.0.0_best' }
 };
+// OCR 资源基址：默认与应用同源（自托管于 GitHub Pages，国内可达），取不到时回退 jsdelivr
+function ocrBase(){
+  try {
+    if(location.protocol === 'http:' || location.protocol === 'https:') return new URL('ocr/', location.href).href;
+  } catch(e){}
+  return 'https://cdn.jsdelivr.net/npm/';
+}
 function ocrLangPath(){
   const lv = OCR_LEVELS[settings.ocrLevel] || OCR_LEVELS.fast;
-  return lv.path;
+  return lv.path || (ocrBase() + 'tessdata/');
 }
 function savePapers(){ DB.set('papers', papers); }
 function saveSessions(){ DB.set('sessions', sessions); }
@@ -1094,16 +1101,25 @@ function qTimeDisplay(s, qid, shownAt, now, isCurrent){
 const OCR_LANG = 'chi_sim';
 let _tessPromise = null, _ocrWorker = null, _ocrWorkerLevel = null, _ocrBusy = false;
 
-// OCR 引擎懒加载：只有真遇到扫描版 PDF 才下载（约 66KB）
+// OCR 引擎懒加载：优先同源自托管（GitHub Pages，国内可达），失败再回退 jsdelivr
 function loadTesseract(){
   if(window.Tesseract) return Promise.resolve(window.Tesseract);
   if(_tessPromise) return _tessPromise;
+  const base = ocrBase();
+  const sources = base.startsWith('http') && !base.includes('jsdelivr')
+    ? [base + 'tesseract.min.js', 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js']
+    : [base + 'tesseract.js@5.1.1/dist/tesseract.min.js'];
   _tessPromise = new Promise((res, rej) => {
-    const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
-    s.onload = () => window.Tesseract ? res(window.Tesseract) : rej(new Error('OCR 引擎加载失败'));
-    s.onerror = () => { _tessPromise = null; rej(new Error('OCR 引擎加载失败（需联网下载），请改用「粘贴文本」')); };
-    document.head.appendChild(s);
+    let i = 0;
+    const tryNext = () => {
+      if(i >= sources.length){ _tessPromise = null; rej(new Error('OCR 引擎加载失败（需联网下载），请改用「粘贴文本」')); return; }
+      const s = document.createElement('script');
+      s.src = sources[i++];
+      s.onload = () => window.Tesseract ? res(window.Tesseract) : tryNext();
+      s.onerror = () => { s.remove(); tryNext(); };
+      document.head.appendChild(s);
+    };
+    tryNext();
   });
   return _tessPromise;
 }
@@ -1127,6 +1143,8 @@ async function ocrRecognize(canvas){
   if(!_ocrWorker || _ocrWorkerLevel !== level){
     releaseOcrWorker();
     _ocrWorker = await T.createWorker(OCR_LANG, 1, {
+      workerPath: ocrBase() + 'worker.min.js',
+      corePath: ocrBase(),
       langPath: ocrLangPath(),
       gzip: true,
       logger: () => {}
@@ -2170,7 +2188,7 @@ function viewMine(){
     ⑥ 文字版和扫描版<b>混在一份 PDF 里也支持</b>——逐页自动判断，哪页没文字层就 OCR 哪页。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。<b>扫描/拍照版 PDF 也能识别</b>——自动走浏览器内 OCR（首次需联网下载中文识别包约 1MB，之后可离线用），一页约 3～10 秒，识别后请校对。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.8 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.9 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
