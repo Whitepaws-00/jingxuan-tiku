@@ -1816,9 +1816,9 @@ function pick(key){
     render();
     return;
   }
-  // 首次作答：记录当时已累计的用时（仅作快照，后续仍会继续累加）
-  const t = Math.max(1, Math.round(qTimeDisplay(s, qid, q.shownAt, Date.now(), true)));
-  s.answers[qid] = { choice: key, correct: key === cur.question.answer, time: t };
+  // 首次作答：不写用时快照（历史版本在此写入"累计+本次停留"，导致离开该题时 qtAccrue
+  // 又以它为基数叠加一次停留，造成整题用时双倍）；用时统一由 qtAccrue 在切题/交卷时结算
+  s.answers[qid] = { choice: key, correct: key === cur.question.answer, time: 0 };
   saveSessions();
   if(settings.autoNext) nextQ(); else render();
 }
@@ -2323,7 +2323,7 @@ function viewMine(){
     ⑥ 文字版和扫描版<b>混在一份 PDF 里也支持</b>——逐页自动判断，哪页没文字层就 OCR 哪页。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。<b>若答案 PDF 里有「N.答案【解析】…」这样的解析段落，会按题号一并录入</b>，交卷后在报告里点任意一题即可查看选项对错标记与解析。<b>扫描/拍照版 PDF 也能识别</b>——自动走浏览器内 OCR（首次需联网下载中文识别包约 1.7MB，之后可离线用），一页约 3～10 秒，识别后请校对。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v5.1 · 计时修复 · 报告可查题与解析 · 支持扫描版 PDF 识别 · 云同步 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v5.2 · 计时修复 · 报告可查题与解析 · 支持扫描版 PDF 识别 · 云同步 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
@@ -2700,8 +2700,25 @@ document.addEventListener('visibilitychange', () => {
     }
   }catch(e){}
 });
-window.addEventListener('beforeunload', () => { try{ saveSessions(); saveWrongs(); }catch(e){} });
-window.addEventListener('pagehide', () => { try{ saveSessions(); saveWrongs(); }catch(e){} });
+window.addEventListener('beforeunload', () => {
+  try{
+    // 关页兜底：结算当前题停留时间（历史上由作答快照兜底，现统一走 qtimes）
+    if(state.quizView && state.quiz){
+      const s = currentSession();
+      if(s) qtAccrue(s, s.qids[state.quiz.pos], state.quiz.shownAt, Date.now());
+    }
+    saveSessions(); saveWrongs();
+  }catch(e){}
+});
+window.addEventListener('pagehide', () => {
+  try{
+    if(state.quizView && state.quiz){
+      const s = currentSession();
+      if(s) qtAccrue(s, s.qids[state.quiz.pos], state.quiz.shownAt, Date.now());
+    }
+    saveSessions(); saveWrongs();
+  }catch(e){}
+});
 
 // ---------- 添加到主屏幕引导（APP化使用） ----------
 (function pwaTip(){
