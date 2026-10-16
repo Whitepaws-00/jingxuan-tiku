@@ -1168,6 +1168,82 @@ function qTimeDisplay(s, qid, shownAt, now, isCurrent){
 
 //CORE>>>
 
+// ---------- Word(.docx) 解析 ----------
+// docx 本质是 zip：用自托管 fflate 解压，取 word/document.xml，按段落提取纯文本
+let _fflatePromise = null;
+function libBase(){
+  try {
+    if(location.protocol === 'http:' || location.protocol === 'https:') return new URL('lib/', location.href).href;
+  } catch(e){}
+  return 'https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/';
+}
+function ensureFFlate(){
+  if(window.fflate) return Promise.resolve(window.fflate);
+  if(_fflatePromise) return _fflatePromise;
+  const base = libBase();
+  const sources = base.includes('jsdelivr')
+    ? [base + 'index.js']
+    : [base + 'fflate.min.js', 'https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js'];
+  _fflatePromise = new Promise((res, rej) => {
+    let i = 0;
+    const tryNext = () => {
+      if(i >= sources.length){ _fflatePromise = null; rej(new Error('解压组件加载失败（需联网），请改用「粘贴文本」')); return; }
+      const s = document.createElement('script');
+      s.src = sources[i++];
+      s.onload = () => window.fflate ? res(window.fflate) : tryNext();
+      s.onerror = () => { s.remove(); tryNext(); };
+      document.head.appendChild(s);
+    };
+    tryNext();
+  });
+  return _fflatePromise;
+}
+async function extractTextFromDocx(file, onProgress){
+  if(onProgress) onProgress(1, 1, 'docx');
+  const ffl = await ensureFFlate();
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const files = ffl.unzipSync(buf);
+  const xmlBytes = files['word/document.xml'];
+  if(!xmlBytes) throw new Error('这不是有效的 Word(.docx) 文件（缺少 document.xml）');
+  const xml = new TextDecoder('utf-8').decode(xmlBytes);
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const lines = [];
+  const walk = node => {
+    for(const child of node.childNodes){
+      if(child.nodeType !== 1) continue;
+      const tag = child.localName;
+      if(tag === 'p'){
+        let text = '';
+        for(const r of child.getElementsByTagNameNS(NS, 't')) text += r.textContent;
+        lines.push(text);
+      } else if(tag === 'tbl'){
+        // 表格：按行提取，单元格间用空格分隔
+        for(const tr of child.getElementsByTagNameNS(NS, 'tr')){
+          const cells = [];
+          for(const tc of tr.getElementsByTagNameNS(NS, 'tc')){
+            let t = '';
+            for(const r of tc.getElementsByTagNameNS(NS, 't')) t += r.textContent;
+            cells.push(t.trim());
+          }
+          if(cells.some(c => c)) lines.push(cells.join('  '));
+        }
+      } else if(child.children && child.children.length){
+        walk(child);
+      }
+    }
+  };
+  walk(doc.documentElement);
+  if(onProgress) onProgress(1, 1, 'docx');
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+// 按扩展名分派：.docx 走 Word 解析，其余走 PDF（含扫描版 OCR）
+function extractTextFromFile(file, onProgress){
+  const name = (file.name || '').toLowerCase();
+  if(name.endsWith('.docx') || name.endsWith('.docm')) return extractTextFromDocx(file, onProgress);
+  return extractTextFromPDF(file, onProgress);
+}
+
 // ---------- PDF 解析 ----------
 // 文字版：pdf.js getTextContent（按行聚合）
 // 扫描/图片版：pdf.js 渲染成 canvas → tesseract.js 中文 OCR → 输出同格式文本，复用同一套解析器
@@ -1456,16 +1532,16 @@ function viewImport(){
   const imp = state.imp;
   let html = `<header class="appbar"><div class="title"><span class="backlink" data-act="import-exit">‹ 返回</span>　完整录入</div><div class="sub">${imp.step===0?'第一步：来源':'第二步：校对'}</div></header><main>`;
   if(imp.step === 0){
-    html += `<div class="card"><h3>📄 方式一：上传 PDF 试卷</h3>
-      <div class="muted" style="margin-bottom:10px">文字版 PDF 直接提取文字；<b>扫描/拍照版 PDF 自动 OCR 识别</b>（含题干、选项、末尾答案页效果最佳）。也支持纯答案的 PDF（只提取答案建卡）。</div>
-      <input type="file" id="pdfFile" accept="application/pdf" style="width:100%">
+    html += `<div class="card"><h3>📄 方式一：上传 PDF / Word 试卷</h3>
+      <div class="muted" style="margin-bottom:10px">文字版 PDF 与 <b>Word(.docx)</b> 直接提取文字；<b>扫描/拍照版 PDF 自动 OCR 识别</b>（含题干、选项、末尾答案页效果最佳）。也支持纯答案的 PDF/Word（只提取答案建卡）。</div>
+      <input type="file" id="pdfFile" accept="application/pdf,.docx" style="width:100%">
       <div id="pdfStatus" class="muted" style="margin-top:8px"></div>
       <label style="display:flex;align-items:center;gap:7px;margin-top:10px;font-size:13px;cursor:pointer">
         <input type="checkbox" id="forceOcrBox"> 强制识别所有页（文字版混排/识别不全时勾选，会明显变慢）</label>
       <div class="muted" style="margin-top:8px;font-size:12px;line-height:1.7">🖍 扫描版说明：识别在本机浏览器内完成，不上传题目；<b>首次</b>需联网下载中文识别包（默认约 1.7MB，之后可离线用）。一页约 3～10 秒，请耐心等待，识别后务必校对一遍。</div></div>
-      <div class="card"><h3>📄 上传答案 PDF（可选，答案分册时用）</h3>
-      <div class="muted" style="margin-bottom:10px">答案单独成册时先传这里暂存，解析出试卷后会按题号自动填入；只传答案 PDF 也可以（自动建空答题卡）。文字版与扫描版均可识别。</div>
-      <input type="file" id="ansPdfFile0" accept="application/pdf" style="width:100%">
+      <div class="card"><h3>📄 上传答案 PDF / Word（可选，答案分册时用）</h3>
+      <div class="muted" style="margin-bottom:10px">答案单独成册时先传这里暂存，解析出试卷后会按题号自动填入；只传答案文件也可以（自动建空答题卡）。PDF（文字版/扫描版）与 Word(.docx) 均可识别。</div>
+      <input type="file" id="ansPdfFile0" accept="application/pdf,.docx" style="width:100%">
       <div id="ansPdfStatus0" class="muted" style="margin-top:8px"></div></div>
       <div class="card"><h3>📝 方式二：粘贴题目文本</h3>
       <textarea id="pasteText" rows="9" placeholder="粘贴题目文本，例如：&#10;1. 题干……&#10;A. 选项一　B. 选项二　C. 选项三　D. 选项四&#10;……&#10;参考答案：1.B 2.A 或 1-5 BADCB&#10;&#10;只粘贴答案也可以（自动只建答题卡）"></textarea>
@@ -1479,8 +1555,8 @@ function viewImport(){
       <div class="muted" style="margin-bottom:10px;font-size:12.5px">标准 65 题结构：政治理论10 · 常识判断10 · 言语理解10 · 数量关系5 · 图形推理5 · 逻辑判断10 · 科学推理5 · 资料分析10</div>
       <div class="row"><input type="number" id="btFrom" placeholder="起" style="width:70px" min="1"><span class="muted">至</span><input type="number" id="btTo" placeholder="止" style="width:70px" min="1"><select id="btType" class="grow">${DEFAULT_TYPES.map(t=>`<option>${t}</option>`).join('')}</select><button class="btn btn-sm btn-primary" data-act="batch-type">应用</button></div></div>
       <div class="card"><h3>⚡ 批量录入/修正答案</h3>
-      <div class="muted" style="margin-bottom:8px">📄 <b>上传答案 PDF</b>（试卷与答案分册时用）：解析后按题号自动填入，文字版/扫描版均可</div>
-      <input type="file" id="ansPdfFile" accept="application/pdf" style="width:100%">
+      <div class="muted" style="margin-bottom:8px">📄 <b>上传答案 PDF / Word</b>（试卷与答案分册时用）：解析后按题号自动填入，PDF 文字版/扫描版/Word(.docx) 均可</div>
+      <input type="file" id="ansPdfFile" accept="application/pdf,.docx" style="width:100%">
       <div id="ansPdfStatus" class="muted" style="margin:8px 0"></div>
       <textarea id="ansText" rows="2" placeholder="也可以直接粘贴，如：1-5 BADCB 换行 11.B 12.D"></textarea>
       <button class="btn btn-sm btn-primary" style="margin-top:8px" data-act="batch-ans-text">按题号覆盖填入</button></div>`;
@@ -1549,18 +1625,23 @@ function parseTextEntry(text, nameFallback){
   const ansN = qs.filter(q => q.answer).length;
   const fullN = qs.filter(hasContent).length;
   state.imp = { step: 1, name: nameFallback || '', questions: qs, srcPaperId: null };
-  let fromPdf = 0;
+  let fromPdf = 0, anaN = 0;
   if(!ansN){ fromPdf = fillPendingAns(qs); } // 题目本身没带答案时，自动用第一步暂存的答案 PDF 填入
+  else {
+    // 题目文本自带答案（末尾"参考答案：…"）：同步提取自带解析
+    const ana = extractAnalysisMap(text, qs.length);
+    for(const k in ana){ if(qs[k-1] && !qs[k-1].analysis){ qs[k-1].analysis = ana[k]; anaN++; } }
+  }
   render();
-  toast(`解析出 ${qs.length} 题（带题干${fullN}、含答案${ansN}）${fromPdf ? `，已从答案 PDF 填入 ${fromPdf} 个` : ''}，请校对`);
+  toast(`解析出 ${qs.length} 题（带题干${fullN}、含答案${ansN}${anaN ? '、解析' + anaN : ''}）${fromPdf ? `，已从答案 PDF 填入 ${fromPdf} 个` : ''}，请校对`);
 }
 async function handlePDFFile(input){
   const f = input.files && input.files[0]; if(!f) return;
   const st = $('#pdfStatus');
   if(state.imp) state.imp.forceOcr = !!($('#forceOcrBox') && $('#forceOcrBox').checked);
   try{
-    st.textContent = '正在解析 PDF，请稍候…';
-    const text = await extractTextFromPDF(f, (p, n, phase) => {
+    st.textContent = '正在解析文件，请稍候…';
+    const text = await extractTextFromFile(f, (p, n, phase) => {
       st.textContent = phase === 'ocr'
         ? `扫描页识别中 ${p}/${n} 页…（首次需下载中文识别包，请稍候）`
         : `正在解析第 ${p}/${n} 页…`;
@@ -1574,11 +1655,11 @@ async function handleAnsPDFFile0(input){
   const f = input.files && input.files[0]; if(!f) return;
   const st = $('#ansPdfStatus0');
   try{
-    st.textContent = '正在解析答案 PDF…';
-    const text = await extractTextFromPDF(f, (p, n, phase) => {
+    st.textContent = '正在解析答案文件…';
+    const text = await extractTextFromFile(f, (p, n, phase) => {
       st.textContent = phase === 'ocr'
         ? `扫描页识别中 ${p}/${n} 页…（首次需下载中文识别包，请稍候）`
-        : `正在解析答案 PDF 第 ${p}/${n} 页…`;
+        : `正在解析答案文件 第 ${p}/${n} 页…`;
     });
     if(!text.trim()) throw new Error('未提取到文字，可能是扫描图片版 PDF');
     const { count } = parseAnswerText(text, 500);
@@ -1594,11 +1675,11 @@ async function handleAnsPDFFile(input){
   const imp = state.imp; if(!imp) return;
   const st = $('#ansPdfStatus');
   try{
-    st.textContent = '正在解析答案 PDF…';
-    const text = await extractTextFromPDF(f, (p, n, phase) => {
+    st.textContent = '正在解析答案文件…';
+    const text = await extractTextFromFile(f, (p, n, phase) => {
       st.textContent = phase === 'ocr'
         ? `扫描页识别中 ${p}/${n} 页…（首次需下载中文识别包，请稍候）`
-        : `正在解析答案 PDF 第 ${p}/${n} 页…`;
+        : `正在解析答案文件 第 ${p}/${n} 页…`;
     });
     if(!text.trim()) throw new Error('未提取到文字，可能是扫描图片版 PDF');
     const { map, count } = parseAnswerText(text, imp.questions.length);
@@ -2322,8 +2403,8 @@ function viewMine(){
     ⑤ 清晰度建议：<b>300dpi 左右的灰度/黑白扫描</b>效果最好；拍照请正对、光线匀、页面占满画面；<br>
     ⑥ 文字版和扫描版<b>混在一份 PDF 里也支持</b>——逐页自动判断，哪页没文字层就 OCR 哪页。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
-    四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。<b>若答案 PDF 里有「N.答案【解析】…」这样的解析段落，会按题号一并录入</b>，交卷后在报告里点任意一题即可查看选项对错标记与解析。<b>扫描/拍照版 PDF 也能识别</b>——自动走浏览器内 OCR（首次需联网下载中文识别包约 1.7MB，之后可离线用），一页约 3～10 秒，识别后请校对。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v5.2 · 计时修复 · 报告可查题与解析 · 支持扫描版 PDF 识别 · 云同步 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
+    四种方式：① 「完整录入」第一步直接上传答案 PDF/Word（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF/Word 填入/修正；③ 直接上传纯答案 PDF/Word（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。<b>若答案 PDF 里有「N.答案【解析】…」这样的解析段落，会按题号一并录入</b>，交卷后在报告里点任意一题即可查看选项对错标记与解析。<b>扫描/拍照版 PDF 也能识别</b>——自动走浏览器内 OCR（首次需联网下载中文识别包约 1.7MB，之后可离线用），一页约 3～10 秒，识别后请校对。</div></details></div>
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v5.3 · 支持Word上传 · 报告可查题与解析 · 支持扫描版 PDF 识别 · 云同步 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
