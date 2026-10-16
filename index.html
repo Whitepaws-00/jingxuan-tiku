@@ -275,6 +275,69 @@ function parsePlainLetters(str, maxN){
   for(let i = 0; i < ls.length && i < maxN; i++){ out[i + 1] = ls[i]; cnt++; }
   return { map: out, count: cnt };
 }
+// ---------- 解析提取（纯函数）：从答案 PDF/文本中按题号提取「解析」段落 ----------
+// 支持格式：N.答案【解析】…（可多行）/ N. 解析：… / N.【答案】B。【解析】…
+function extractAnalysisMap(text, maxN){
+  const lines = String(text).split(/\r?\n/);
+  const out = {}; let cur = 0, buf = [], collecting = false;
+  const ANA = /(【|［|\()\s*解\s*析\s*(】|］|\))?\s*[:：]?|解\s*析\s*[:：]/;
+  const flush = () => {
+    if(cur && buf.length){
+      const t = buf.join('\n').replace(/\s+$/, '').trim();
+      if(t && !out[cur]) out[cur] = t.slice(0, 3000);
+      else if(t && out[cur] && out[cur].length < 50) out[cur] = (out[cur] + '\n' + t).slice(0, 3000);
+    }
+    buf = []; collecting = false;
+  };
+  for(const raw of lines){
+    const line = raw.trim();
+    // 顶层「【答案】N.X」行（此前未在收集状态）：切换到对应题号，同行/后续行有【解析】则收集
+    const am0 = line.match(/^(【|［|\()\s*参?考?答案\s*(】|］|\))?\s*[:：]?\s*(\d{1,3})\s*[.．、]?\s*[A-Ha-h]/);
+    if(am0 && !collecting){
+      flush();
+      cur = +am0[3]; buf = []; collecting = cur <= maxN;
+      const ai = line.search(ANA);
+      if(collecting && ai > -1) buf = [line.slice(ai).replace(ANA, '').trim()];
+      continue;
+    }
+    const m = line.match(/^(\d{1,3})\s*[.．、)）]\s*/);
+    if(m){
+      flush();
+      cur = +m[1]; if(cur > maxN) cur = 0;
+      if(!cur) continue;
+      let rest = line.slice(m[0].length);
+      rest = rest.replace(/^[A-Ha-h]{1,4}\s*/, '')          // 去掉行首答案字母（如「1.B【解析】」）
+                 .replace(/^(【|［|\()\s*参?\s*考?\s*答?\s*案\s*(】|］|\))?\s*[:：]?/, '')  // 去「【答案】」
+                 .replace(/^[A-Ha-h]{1,4}(\s*[。.，,、；;])?/, ''); // 去紧跟的答案字母
+      const i = rest.search(ANA);
+      if(i > -1){ collecting = true; buf = [rest.slice(i).replace(ANA, '').trim()]; }
+      else if(/^[(【(]?\s*(参)?考?答案/.test(rest)) { collecting = false; buf = []; }
+      else { collecting = false; buf = []; }
+    } else if(collecting && cur){
+      if(!line || isPageHeaderLine(line)) continue;
+      // 遇到下一个「【答案】N.X」块：结束本题；若块内有新题号+【解析】则切换继续收集
+      const am = line.match(/^(【|［|\()?\s*参?考?答案\s*(】|］|\))?\s*[:：]?\s*(\d{1,3})?\s*[.．、]?\s*[A-Ha-h]*/);
+      if(am && /答案/.test(line)){
+        flush();
+        const nm = am[3];
+        const ai = line.search(ANA);
+        if(nm){
+          cur = +nm; if(cur > maxN) cur = 0;
+          if(cur){ collecting = true; if(ai > -1){ buf = [line.slice(ai).replace(ANA, '').trim()]; } else { buf = []; } } // 「【答案】N.X【解析】…」同行或换行接解析
+        } else if(ai > -1){ collecting = true; buf = [line.slice(ai).replace(ANA, '').trim()]; }
+        continue;
+      }
+      // 收集中遇到单独的「【解析】」标记行：丢弃标记行本身，后续内容继续收集
+      if(/^(【|［|\()\s*解\s*析\s*(】|］|\))?\s*[:：]?\s*$/.test(line)) continue;
+      if(/^(参考答案|答案解析|试题解析|第\s*\d+\s*题)/.test(line)){ flush(); continue; }
+      buf.push(line.replace(/^(【|［|\()\s*解\s*析\s*(】|］|\))?\s*[:：]?/, ''));
+    }
+  }
+  flush();
+  const clean = {};
+  for(const k in out){ if(out[k] && out[k].length >= 2) clean[k] = out[k]; }
+  return clean;
+}
 // ---------- 题目文本解析（题干+选项+答案） ----------
 function isNoiseLine(line){
   if(/^[(【(]?\s*(参考)?答案/.test(line) && /[A-H]/.test(line)) return true;
@@ -765,12 +828,19 @@ function buildStats(session, questions){
   return { perQ, types, totalQ, answered, correct, scoreRate, avgTime, totalTime };
 }
 function mdCell(t){ return String(t == null ? '' : t).replace(/\|/g, '｜').replace(/\r?\n/g, ' '); }
+// 模式文案：整卷 / 专项（…）/ 自定义（第X~Y题）
+function modeLabel(s){
+  if(s.mode === 'special') return '专项练习（' + (s.types || []).join('、') + '）';
+  if(s.mode === 'range') return '自定义（第' + (s.range ? s.range.from : '?') + '～' + (s.range ? s.range.to : '?') + '题）';
+  return '整卷';
+}
+function modeShort(s){ return s.mode === 'special' ? '专项' : (s.mode === 'range' ? '自定义' : '整卷'); }
 // ---------- 报告导出 ----------
 function reportToMarkdown(s, qs, st){
   const L = [];
   L.push(`# 京选刷题 · 成绩报告\n`);
   L.push(`> **试卷**：${s.paperName}  `);
-  L.push(`> **模式**：${s.mode === 'special' ? '专项练习（' + (s.types || []).join('、') + '）' : '整卷'}  `);
+  L.push(`> **模式**：${modeLabel(s)}  `);
   L.push(`> **作答时间**：${fmtTime(s.firstStartedAt || s.startedAt)} ~ ${fmtTime(s.finishedAt)}  `);
   L.push(`> **导出时间**：${fmtTime(Date.now())}\n`);
   L.push(`## 一、总览\n`);
@@ -1277,6 +1347,7 @@ const state = {
   quizView: false, quiz: null,           // quiz: {sessionId, pos, shownAt}
   importView: false, imp: null,          // imp: {step(0来源/1校对), name, questions, srcPaperId}
   reportOpenId: null,
+  reportQid: null,                       // 报告单题详情：当前查看的题目 id
   wrongRedo: null,                       // {list, pos, okCount, answered}
   wrongShowResolved: false,
   sheetOpen: false,
@@ -1418,6 +1489,7 @@ function viewImport(){
         <button class="del-x" data-act="q-del" data-qid="${q.id}">✕</button></div>
         <textarea rows="2" data-act="q-stem" data-qid="${q.id}" placeholder="题干（留空则作答时只显示字母涂卡）">${esc(q.stem)}</textarea>
         ${q.material ? `<details class="q-material" style="margin:6px 0"><summary>📄 共用材料（第 ${q.mFrom||'?'}~${q.mTo||'?'} 题）· 点开展开编辑</summary><textarea rows="4" data-act="q-material" data-qid="${q.id}" style="margin-top:6px;width:100%">${esc(q.material)}</textarea></details>` : ''}
+        <details style="margin:6px 0"><summary style="font-size:12.5px;color:#5b6b8c">📝 解析${q.analysis ? '（已录入，点击查看/编辑）' : '（可选，报告里展示）'}</summary><textarea rows="3" data-act="q-ana" data-qid="${q.id}" style="margin-top:6px;width:100%" placeholder="本题解析（可从答案 PDF 自动录入，也可在此手填）">${esc(q.analysis || '')}</textarea></details>
         ${q.type === '图形推理' || /图形|下图|拼(出|成)/.test((q.stem||'')+JSON.stringify(q.options||{})) ? `<div class="q-imgmiss" style="margin:6px 0">🖼 本题含图（PDF 未能自动提取）。可点下方按钮插入图片：</div>
           <div class="row" style="margin-bottom:6px"><input type="file" accept="image/*" data-act="q-img" data-qid="${q.id}" style="font-size:12px"></div>` : ''}
         ${keys.map(k => `<div class="oedit"><span class="k">${k}</span><textarea rows="1" data-act="q-opt" data-qid="${q.id}" data-key="${k}" placeholder="选项${k}内容（可留空）">${esc(q.options[k])}</textarea><button class="del-x" data-act="q-opt-del" data-qid="${q.id}" data-key="${k}">✕</button></div>`).join('')}
@@ -1446,7 +1518,12 @@ function fillPendingAns(questions){
   const { map, count } = parseAnswerText(state.pendingAnsText, questions.length);
   let n = 0;
   for(const k in map){ if(questions[k-1]){ questions[k-1].answer = map[k]; n++; } }
+  // 同步提取解析（答案 PDF 里带「解析」段落时一并录入）
+  const ana = extractAnalysisMap(state.pendingAnsText, questions.length);
+  let an = 0;
+  for(const k in ana){ if(questions[k-1] && !questions[k-1].analysis){ questions[k-1].analysis = ana[k]; an++; } }
   state.pendingAnsText = null;
+  if(an) toast(`并已录入 ${an} 道题的解析`);
   return n;
 }
 function editPaper(pid){
@@ -1525,8 +1602,12 @@ async function handleAnsPDFFile(input){
     if(!count) throw new Error('未解析出答案（需要形如 1-5 BADCB 或 11.B 的答案行）');
     let n = 0;
     for(const k in map){ if(imp.questions[k-1]){ imp.questions[k-1].answer = map[k]; n++; } }
+    // 同步提取解析
+    const ana = extractAnalysisMap(text, imp.questions.length);
+    let an = 0;
+    for(const k in ana){ if(imp.questions[k-1] && !imp.questions[k-1].analysis){ imp.questions[k-1].analysis = ana[k]; an++; } }
     render();
-    toast(`已从 PDF 填入 ${n} 个答案（共 ${imp.questions.length} 题）`);
+    toast(`已从 PDF 填入 ${n} 个答案${an ? `、${an} 段解析` : ''}（共 ${imp.questions.length} 题）`);
   }catch(e){ st.textContent = '⚠️ ' + e.message; input.value = ''; }
 }
 function applyCountEdit(){
@@ -1549,10 +1630,15 @@ function batchType(){
 }
 function batchAnsText(){
   const imp = state.imp;
-  const { map, count } = parseAnswerText($('#ansText').value, imp.questions.length);
+  const txt = $('#ansText').value;
+  const { map, count } = parseAnswerText(txt, imp.questions.length);
   if(!count){ toast('未解析出答案，请检查格式'); return; }
   for(const n in map){ imp.questions[n-1].answer = map[n]; }
-  render(); toast(`已覆盖填入 ${count} 个答案`);
+  // 同步提取解析
+  const ana = extractAnalysisMap(txt, imp.questions.length);
+  let an = 0;
+  for(const k in ana){ if(imp.questions[k-1] && !imp.questions[k-1].analysis){ imp.questions[k-1].analysis = ana[k]; an++; } }
+  render(); toast(`已覆盖填入 ${count} 个答案${an ? `、${an} 段解析` : ''}`);
 }
 function savePaper(){
   const imp = state.imp;
@@ -1584,7 +1670,7 @@ function viewQuizTab(){
     ongoing.forEach(s => {
       const total = s.qids.length, done = Object.keys(s.answers).length;
       html += `<div class="card" style="border:1.5px solid var(--orange)"><h3>⏸ 进行中：${esc(s.paperName)}</h3>
-        <div class="muted" style="margin-bottom:10px">已答 ${done}/${total} 题${s.mode==='special' ? ' · 专项：' + esc((s.types||[]).join('、')) : ''}${s.timeLimit ? ' · 限时 ' + (s.timeLimit/60) + ' 分钟' : ' · 不限时'}</div>
+        <div class="muted" style="margin-bottom:10px">已答 ${done}/${total} 题${s.mode==='special' ? ' · 专项：' + esc((s.types||[]).join('、')) : ''}${s.mode==='range' && s.range ? ' · 第' + s.range.from + '～' + s.range.to + '题' : ''}${s.timeLimit ? ' · 限时 ' + (s.timeLimit/60) + ' 分钟' : ' · 不限时'}</div>
         <div class="row"><button class="btn btn-primary grow" data-act="quiz-resume" data-sid="${s.id}">继续做题</button>
         <button class="btn btn-danger btn-sm" data-act="quiz-abandon" data-sid="${s.id}">放弃</button></div></div>`;
     });
@@ -1607,8 +1693,9 @@ function viewQuizTab(){
     const p = papers.find(x => x.id === state.quizConfigPid);
     const types = [...new Set(p.questions.map(q => q.type || '未分类'))];
     html += `<div class="card" style="border:1.5px solid var(--blue)"><h3>⚙️ 练习设置：${esc(p.name)}</h3>
-      <div class="setrow"><span>练习范围</span><span><label style="margin-right:10px"><input type="radio" name="qmode" value="full" checked> 整卷（${p.questions.length}题）</label><label><input type="radio" name="qmode" value="special"> 专项</label></span></div>
+      <div class="setrow"><span>练习范围</span><span style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end"><label><input type="radio" name="qmode" value="full" checked> 整卷（${p.questions.length}题）</label><label><input type="radio" name="qmode" value="special"> 专项</label><label><input type="radio" name="qmode" value="range"> 自定义</label></span></div>
       <div id="specialBox" style="display:none;padding:8px 0">${types.map(t => `<label style="display:inline-block;margin:4px 8px 4px 0"><input type="checkbox" class="sp-type" value="${esc(t)}" checked> ${esc(t)}</label>`).join('')}</div>
+      <div id="rangeBox" style="display:none;padding:8px 0"><div class="row"><span class="muted">第</span><input type="number" id="rangeFrom" min="1" max="${p.questions.length}" value="1" style="width:76px"><span class="muted">题 至</span><input type="number" id="rangeTo" min="1" max="${p.questions.length}" value="${p.questions.length}" style="width:76px"><span class="muted">题</span></div><div class="muted" style="font-size:12px;margin-top:4px">只做第 X～Y 题，交卷时只批这一段（如考前分块刷题）</div></div>
       <div class="setrow"><span>限时（分钟，0 为不限时）</span><input type="number" id="timeLimitInput" value="${settings.timeLimit || 0}" min="0" style="width:90px"></div>
       <div class="setrow"><span>答完自动下一题</span><label class="switch"><input type="checkbox" id="autoNextInput" ${settings.autoNext?'checked':''}><i></i></label></div>
       <button class="btn btn-primary btn-block" style="margin-top:12px" data-act="quiz-begin" data-pid="${p.id}">开始做题 →</button></div>`;
@@ -1633,10 +1720,19 @@ function beginQuiz(pid){
     questions = questions.filter(q => types.includes(q.type || '未分类'));
     if(!questions.length){ toast('所选题型下没有题目'); return; }
   }
+  let range = null;
+  if(mode === 'range'){
+    const a = +($('#rangeFrom') ? $('#rangeFrom').value : 0), b = +($('#rangeTo') ? $('#rangeTo').value : 0);
+    if(!a || !b){ toast('请输入起止题号'); return; }
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    if(lo < 1 || hi > p.questions.length){ toast(`题号需在 1～${p.questions.length} 之间`); return; }
+    range = { from: lo, to: hi };
+    questions = p.questions.slice(lo - 1, hi);
+  }
   const lim = +($('#timeLimitInput') ? $('#timeLimitInput').value : 0) || 0;
   settings.autoNext = !!(document.querySelector('#autoNextInput') && document.querySelector('#autoNextInput').checked);
   if(lim) settings.timeLimit = lim; saveSettings();
-  const s = { id: uid('s'), paperId: p.id, paperName: p.name, mode, types, timeLimit: lim ? lim * 60 : null, startedAt: Date.now(), firstStartedAt: Date.now(), finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: questions.map(q => q.id) };
+  const s = { id: uid('s'), paperId: p.id, paperName: p.name, mode, types, range, timeLimit: lim ? lim * 60 : null, startedAt: Date.now(), firstStartedAt: Date.now(), finishedAt: null, answers: {}, status: 'ongoing', pos: 0, qids: questions.map(q => q.id) };
   sessions.push(s); saveSessions();
   state.quizConfigPid = null;
   enterQuiz(s.id);
@@ -1822,14 +1918,14 @@ function viewQuizRun(){
   const qTimeRow = `<div class="q-time" id="qTime">⏱ 本题用时 <b>${qTimeText}</b><span class="muted" id="qTimeLive">（含回看/改选）</span></div>`;
   let body = '';
   if(rich){
-    body = `<div class="q-num">${esc(s.mode === 'special' ? '专项练习' : s.paperName)} · 第 ${q.pos + 1} 题 ${question.answer ? '' : '<span class="tag red">未设答案，不计分</span>'}</div>
+    body = `<div class="q-num">${esc(modeShort(s) === '整卷' ? s.paperName : modeShort(s))} · 第 ${q.pos + 1} 题 ${question.answer ? '' : '<span class="tag red">未设答案，不计分</span>'}</div>
       ${materialHTML(question)}
       <div class="q-stem">${esc(question.stem) || '<span class="muted">（本题未录题干）</span>'}</div>
       ${imagePlaceholderHTML(question)}
       <div class="opts">${keys.map(k => `<div class="opt ${a && a.choice === k ? 'sel' : ''}" data-act="pick" data-key="${k}"><span class="k">${k}</span><span>${esc(question.options[k] || '')}</span></div>`).join('')}</div>
       ${qTimeRow}`;
   } else {
-    body = `<div class="q-num" style="text-align:center">${esc(s.mode === 'special' ? '专项练习' : s.paperName)} · 第 ${q.pos + 1} 题 ${question.answer ? '' : '<span class="tag red">未设答案</span>'}</div>
+    body = `<div class="q-num" style="text-align:center">${esc(modeShort(s) === '整卷' ? s.paperName : modeShort(s))} · 第 ${q.pos + 1} 题 ${question.answer ? '' : '<span class="tag red">未设答案</span>'}</div>
       <div class="q-typecard"><span class="tag">${esc(question.type || '未分类')}</span></div>
       <div class="big-num">${q.pos + 1}<span style="font-size:24px;color:var(--gray);font-weight:600"> 题</span></div>
       <div class="optgrid">${keys.map(k => `<div class="optcell ${a && a.choice === k ? 'sel' : ''}" data-act="pick" data-key="${k}">${k}</div>`).join('')}</div>
@@ -1910,7 +2006,7 @@ function viewReportList(){
     const st = buildStats(s, qs);
     html += `<div class="card" data-act="report-open" data-sid="${s.id}" style="cursor:pointer">
       <div class="row"><div class="grow"><div style="font-weight:600">${esc(s.paperName)}</div>
-      <div class="muted">${fmtTime(s.finishedAt)} · ${s.mode === 'special' ? '专项' : '整卷'} · ${st.totalQ ? Math.round(st.scoreRate * 100) : '--'}% · 用时 ${fmtSec(st.totalTime)}</div></div>
+      <div class="muted">${fmtTime(s.finishedAt)} · ${modeShort(s)} · ${st.totalQ ? Math.round(st.scoreRate * 100) : '--'}% · 用时 ${fmtSec(st.totalTime)}</div></div>
       <span class="tag ${st.scoreRate >= 0.8 ? 'green' : st.scoreRate >= 0.6 ? 'orange' : 'red'}" style="font-size:15px;padding:6px 12px">${st.totalQ ? Math.round(st.scoreRate * 100) + '%' : '--'}</span></div>
       <div class="row" style="margin-top:8px"><button class="btn btn-sm" data-act="resume-done" data-sid="${s.id}">▶ 继续做题</button></div></div>`;
   });
@@ -1922,9 +2018,45 @@ function viewReportDetail(){
   const p = papers.find(x => x.id === s.paperId);
   const qs = p ? s.qids.map(id => p.questions.find(q => q.id === id)).filter(Boolean) : [];
   if(!qs.length) return `<div class="card empty">试卷已被删除，报告数据不完整</div><div class="card"><button class="btn btn-block" data-act="report-back">‹ 返回列表</button></div>`;
+  // 单题详情视图：点逐题明细的某一行进入
+  if(state.reportQid){
+    const idx = s.qids.indexOf(state.reportQid);
+    const q = p.questions.find(x => x.id === state.reportQid);
+    if(idx === -1 || !q){ state.reportQid = null; }
+    else {
+      const a = s.answers[q.id];
+      const choice = a ? a.choice : '';
+      const correct = a && a.choice === q.answer;
+      const skipped = !a;
+      const keys = Object.keys(q.options || {}).sort();
+      let oh = `<div class="q-stem" style="margin:10px 0">${esc(q.stem) || '<span class="muted">（本题未录题干，仅字母涂卡）</span>'}</div>`;
+      if(keys.length && keys.some(k => q.options[k])){
+        oh += `<div style="margin:10px 0">`;
+        keys.forEach(k => {
+          const isAns = k === q.answer;
+          const isMine = choice === k;
+          let mark = '', color = '', bold = '';
+          if(isAns){ mark = '<span style="color:#1a9c58;font-weight:700">✓</span> '; color = '#1a9c58'; bold = 'font-weight:600'; }
+          if(isMine && !isAns){ mark = '<span style="color:#d84a3f;font-weight:700">✗</span> '; color = '#d84a3f'; bold = 'font-weight:600'; }
+          oh += `<div style="padding:7px 10px;margin:4px 0;border-radius:10px;background:${isAns ? '#eaf7ef' : (isMine ? '#fdeeed' : '#f7f8fb')};color:${color || 'inherit'};${bold}"><span style="font-weight:700;margin-right:6px">${mark}${k}.</span>${esc(q.options[k] || '')}${isAns ? ' <span class="tag green" style="font-size:11px">正确答案</span>' : ''}${isMine && !isAns ? ' <span class="tag red" style="font-size:11px">我的选择</span>' : ''}${isMine && isAns ? ' <span class="tag green" style="font-size:11px">我的选择</span>' : ''}</div>`;
+        });
+        oh += `</div>`;
+      }
+      if(q.analysis) oh += `<div style="background:#f4f7ff;border-radius:12px;padding:12px 14px;margin-top:10px;font-size:14px;line-height:1.75"><b style="color:#2a5bd7">💡 解析</b><br>${esc(q.analysis)}</div>`;
+      else oh += `<div class="muted" style="font-size:12.5px;margin-top:10px">本题暂无解析（可在「编辑」试卷里补充，或在录入答案 PDF 时自动带出）</div>`;
+      return `<header class="appbar"><div class="title"><span class="backlink" data-act="report-q-back">‹ 返回报告</span></div><div class="sub">${esc(s.paperName)}</div></header><main>
+        <div class="card">
+          <div class="row" style="margin-bottom:6px"><span class="tag ${skipped ? 'gray' : (correct ? 'green' : 'red')}">${skipped ? '跳过' : (correct ? '✓ 答对' : '✗ 答错')}</span>
+          <span class="tag gray">${esc(q.type || '未分类')}</span>
+          <span class="muted" style="font-size:12.5px">${a && a.time ? '用时 ' + fmtSec(a.time) : ''}</span></div>
+          <div style="font-weight:700">第 ${idx + 1} 题${s.mode === 'range' && s.range ? `（全卷第 ${s.range.from + idx} 题）` : ''}</div>
+          ${oh}
+        </div></main>${tabbarHTML()}`;
+    }
+  }
   const st = buildStats(s, qs);
   let html = `<header class="appbar"><div class="title"><span class="backlink" data-act="report-back">‹ 报告列表</span></div><div class="sub">${esc(s.paperName)}</div></header><main>`;
-  html += `<div class="card"><div style="font-weight:700;margin-bottom:12px">${esc(s.paperName)} · ${s.mode === 'special' ? '专项（' + esc((s.types||[]).join('、')) + '）' : '整卷'}</div>
+  html += `<div class="card"><div style="font-weight:700;margin-bottom:12px">${esc(s.paperName)} · ${esc(modeLabel(s))}</div>
     <div class="stat-grid">
       <div><div class="v">${st.totalQ ? Math.round(st.scoreRate * 100) + '%' : '--'}</div><div class="l">得分率</div></div>
       <div><div class="v green">${st.correct}<span style="font-size:13px;color:var(--gray)">/${st.totalQ}</span></div><div class="l">答对/计分题</div></div>
@@ -1950,7 +2082,7 @@ function viewReportDetail(){
     const slowTag = r.time > st.avgTime * 1.5 && !r.skipped ? ' <span class="tag orange">慢</span>' : '';
     const badge = r.skipped ? 'skip' : (r.correct ? 'ok' : 'no');
     const sym = r.skipped ? '—' : (r.correct ? '✓' : '✗');
-    html += `<div class="qi"><span class="badge ${badge}">${sym}</span>
+    html += `<div class="qi" data-act="report-q" data-qid="${r.qid}" style="cursor:pointer"><span class="badge ${badge}">${sym}</span>
       <span style="width:46px">第${r.num}题</span>
       <span class="tag gray" style="flex-shrink:0">${esc(r.type)}</span>
       <span class="grow muted" style="font-size:12.5px">${r.skipped ? '跳过' : '选' + r.choice + (r.correct ? '' : '（应' + r.answer + '）')}</span>
@@ -1958,7 +2090,7 @@ function viewReportDetail(){
       <span style="width:50px;height:5px;background:#eef1f7;border-radius:3px;overflow:hidden;flex-shrink:0"><i style="display:block;height:100%;width:${Math.round(r.time / maxTime * 100)}%;background:${r.time > st.avgTime * 1.5 ? 'var(--orange)' : 'var(--blue)'}"></i></span>
       ${r.marked ? '🚩' : ''}</div>`;
   });
-  html += `</div>`;
+  html += `</div><div class="muted" style="text-align:center;font-size:12px;margin-bottom:10px">点任意一行可查看该题详情（选项对错标记与解析）</div>`;
   const wrongIds = st.perQ.filter(r => !r.skipped && !r.correct && r.answer).map(r => r.qid);
   if(wrongIds.length) html += `<button class="btn btn-green btn-block" data-act="redo-wrong-from-report" data-ids="${wrongIds.join(',')}">⭐ 立即重做本次错题（${wrongIds.length} 题）</button><div style="height:10px"></div>`;
   html += `<button class="btn btn-primary btn-block" data-act="resume-done" data-sid="${s.id}">▶ 继续做这套卷子</button>
@@ -2187,8 +2319,8 @@ function viewMine(){
     ⑤ 清晰度建议：<b>300dpi 左右的灰度/黑白扫描</b>效果最好；拍照请正对、光线匀、页面占满画面；<br>
     ⑥ 文字版和扫描版<b>混在一份 PDF 里也支持</b>——逐页自动判断，哪页没文字层就 OCR 哪页。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
-    四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。<b>扫描/拍照版 PDF 也能识别</b>——自动走浏览器内 OCR（首次需联网下载中文识别包约 1MB，之后可离线用），一页约 3～10 秒，识别后请校对。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v4.9 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
+    四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。<b>若答案 PDF 里有「N.答案【解析】…」这样的解析段落，会按题号一并录入</b>，交卷后在报告里点任意一题即可查看选项对错标记与解析。<b>扫描/拍照版 PDF 也能识别</b>——自动走浏览器内 OCR（首次需联网下载中文识别包约 1.7MB，之后可离线用），一页约 3～10 秒，识别后请校对。</div></details></div>
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v5.0 · 自定义范围刷题 · 报告可查题与解析 · 支持扫描版 PDF 识别 · 云同步 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
@@ -2471,8 +2603,10 @@ document.addEventListener('click', e => {
     case 'sheet-open': state.sheetOpen = true; render(); break;
     case 'sheet-close': state.sheetOpen = false; render(); break;
     case 'sheet-jump': jumpToQ(el.dataset.qid); break;
-    case 'report-open': state.reportOpenId = el.dataset.sid; render(); break;
-    case 'report-back': state.reportOpenId = null; render(); break;
+    case 'report-open': state.reportOpenId = el.dataset.sid; state.reportQid = null; render(); break;
+    case 'report-back': state.reportOpenId = null; state.reportQid = null; render(); break;
+    case 'report-q': state.reportQid = el.dataset.qid; render(); break;
+    case 'report-q-back': state.reportQid = null; render(); break;
     case 'export-report-md': exportReportMd(el.dataset.sid || state.reportOpenId); break;
     case 'export-report-json': exportReportJson(el.dataset.sid || state.reportOpenId); break;
     case 'redo-wrong-from-report': { const ids = el.dataset.ids.split(','); const s = sessions.find(x => x.id === state.reportOpenId); const p = papers.find(x => x.id === s.paperId); const list = ids.map(id => { const qq = p.questions.find(q => q.id === id); const a = s.answers[id]; return { id: uid('w'), paperId: s.paperId, paperName: s.paperName, qid: id, q: { stem: qq.stem || '', options: Object.assign({}, qq.options), answer: qq.answer, type: qq.type || '未分类' }, myChoice: a ? a.choice : '', addedAt: Date.now(), resolved: false, redone: 0 }; }); startWrongRedo(list); break; }
@@ -2493,6 +2627,11 @@ document.addEventListener('click', e => {
   }
 });
 document.addEventListener('change', e => {
+  // 练习范围模式切换（radio 无 data-act，需在 closest 过滤前处理）
+  if(e.target && e.target.name === 'qmode'){
+    const box = document.querySelector('#specialBox'); if(box) box.style.display = e.target.value === 'special' ? 'block' : 'none';
+    const rbox = document.querySelector('#rangeBox'); if(rbox) rbox.style.display = e.target.value === 'range' ? 'block' : 'none';
+  }
   const el = e.target.closest('[data-act]'); if(!el) return;
   const act = el.dataset.act, imp = state.imp;
   if(imp){
@@ -2500,6 +2639,7 @@ document.addEventListener('change', e => {
     else if(act === 'q-ans'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q) q.answer = el.value; }
     else if(act === 'q-stem'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q) q.stem = el.value; }
     else if(act === 'q-material'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q) setMaterialForGroup(q, el.value); }
+    else if(act === 'q-ana'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q) q.analysis = el.value; }
     else if(act === 'q-img'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q && el.files && el.files[0]) attachQuestionImage(q, el.files[0]); }
     else if(act === 'q-opt'){ const q = imp.questions.find(x => x.id === el.dataset.qid); if(q) q.options[el.dataset.key] = el.value; }
   }
@@ -2526,9 +2666,6 @@ document.addEventListener('change', e => {
   else if(act === 'sync-nu-path'){ sync.nuPath = (el.value.trim() || 'jxst3_tiku/sync.json'); saveSync(); }
   else if(act === 'sync-platform'){ sync.platform = el.value; saveSync(); render(); }
   else if(act === 'sync-auto'){ sync.autoSync = el.checked; saveSync(); toast(sync.autoSync ? '已开启交卷后自动上传' : '已关闭自动上传'); }
-  if(e.target && e.target.name === 'qmode'){
-    const box = document.querySelector('#specialBox'); if(box) box.style.display = e.target.value === 'special' ? 'block' : 'none';
-  }
 });
 document.addEventListener('change', e => {
   if(e.target && e.target.id === 'pdfFile' && e.target.files && e.target.files[0]) handlePDFFile(e.target);
