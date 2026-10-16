@@ -247,6 +247,16 @@ function extractAnswers(lines){
     while((m = re.exec(line))){ put(+m[1], m[2]); hit = true; }
     return hit;
   };
+  const runAnsTag = (line) => {
+    // 格式1：1.【答案】B。解析：…（题号在前，后跟【答案】标签）
+    // 格式2：【答案】1.B（标签在前）
+    let m, hit = false;
+    let re1 = /(\d{1,3})\s*[.．、]?\s*【\s*答\s*案\s*】\s*[:：]?\s*([A-Ha-h])(?![A-Za-z0-9])/g;
+    while((m = re1.exec(line))){ put(+m[1], m[2]); hit = true; }
+    let re2 = /【\s*答\s*案\s*】\s*[:：]?\s*(\d{1,3})\s*[.．、]?\s*([A-Ha-h])(?![A-Za-z0-9])/g;
+    while((m = re2.exec(line))){ put(+m[1], m[2]); hit = true; }
+    return hit;
+  };
   const runRange = (line) => {
     let m, re = /(\d{1,3})\s*[-~～—–至到]\s*(\d{1,3})\s*[.．、:：]?\s*([A-Ha-h][A-Ha-h\s　]*)/g, hit = false;
     while((m = re.exec(line))){
@@ -258,6 +268,7 @@ function extractAnswers(lines){
   for(const raw of lines){
     const line = raw.replace(/\s+/g, ' ').trim();
     if(!line) continue;
+    runAnsTag(line);
     runRange(line);
     runPair(line);
   }
@@ -2432,7 +2443,7 @@ function viewMine(){
     ⑥ 文字版和扫描版<b>混在一份 PDF 里也支持</b>——逐页自动判断，哪页没文字层就 OCR 哪页。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF/Word（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF/Word 填入/修正；③ 直接上传纯答案 PDF/Word（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。<b>若答案 PDF 里有「N.答案【解析】…」这样的解析段落，会按题号一并录入</b>，交卷后在报告里点任意一题即可查看选项对错标记与解析。<b>扫描/拍照版 PDF 也能识别</b>——自动走浏览器内 OCR（首次需联网下载中文识别包约 1.7MB，之后可离线用），一页约 3～10 秒，识别后请校对。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v5.4 · 背题模式 · 报告可查题与解析 · 支持扫描版 PDF 识别 · 云同步 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v5.5 · 背题模式 · 兼容【答案】标签格式 · 报告可查题与解析 · 支持扫描版 PDF 识别 · 云同步 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
