@@ -1148,7 +1148,10 @@ function qtimesGet(s, qid){ return qtimesBase(s, qid); }
 // 注意：首次结算会以 qtimesBase 为起点，从而把旧数据的 answers.time 平滑迁移进 qtimes
 function qtAccrue(s, qid, shownAt, now){
   if(!s || !qid) return 0;
-  const dt = Math.max(0, (now - shownAt) / 1000);
+  let dt = Math.max(0, (now - shownAt) / 1000);
+  // 单次停留兜底上限 30 分钟：锁屏/切后台/睡着了等异常 wall-clock 不至于把单题计时撑爆
+  // （正常单题停留极少超过 30 分钟；切后台时间由 visibilitychange 精确扣除，这里是最后防线）
+  if(dt > 1800) dt = 1800;
   if(dt <= 0) return qtimesBase(s, qid);
   if(!s.qtimes) s.qtimes = {};
   const base = qtimesBase(s, qid);
@@ -2320,7 +2323,7 @@ function viewMine(){
     ⑥ 文字版和扫描版<b>混在一份 PDF 里也支持</b>——逐页自动判断，哪页没文字层就 OCR 哪页。</div></details>
     <details class="fold"><summary>答案在单独的 PDF 里怎么录入？</summary><div class="muted" style="padding-top:8px;line-height:1.8">
     四种方式：① 「完整录入」第一步直接上传答案 PDF（可选卡片）暂存，解析出试卷后按题号自动填入；② 第二步「批量录入/修正答案」处上传答案 PDF 填入/修正；③ 直接上传纯答案 PDF（只有"1-5 BADCB"这类答案行、无题目），自动按答案生成空答题卡；④ 快速建卡后同样可在第二步上传答案 PDF。<b>若答案 PDF 里有「N.答案【解析】…」这样的解析段落，会按题号一并录入</b>，交卷后在报告里点任意一题即可查看选项对错标记与解析。<b>扫描/拍照版 PDF 也能识别</b>——自动走浏览器内 OCR（首次需联网下载中文识别包约 1.7MB，之后可离线用），一页约 3～10 秒，识别后请校对。</div></details></div>
-    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v5.0 · 自定义范围刷题 · 报告可查题与解析 · 支持扫描版 PDF 识别 · 云同步 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
+    <div class="muted" style="text-align:center;padding:6px 0 20px">京选刷题 v5.1 · 计时修复 · 报告可查题与解析 · 支持扫描版 PDF 识别 · 云同步 · 支持扫描版 PDF 识别 · 坚果云/GitHub/Gitee 云同步</div>`;
 }
 
 // ---------- 云同步 · 流程（依赖 fetch / localStorage） ----------
@@ -2676,8 +2679,26 @@ setInterval(quizTick, 1000);
 render();
 
 // ---------- 页面离开兜底保存（移动端切后台/锁屏/刷新防丢进度） ----------
+// 切后台/锁屏时暂停答题计时：hidden 时先结算隐藏前的停留，并记录 pausedAt；
+// 回到前台时把后台时长从本次停留起点(shownAt)中扣除，避免 wall-clock 虚增用时
 document.addEventListener('visibilitychange', () => {
-  if(document.hidden){ try{ saveSessions(); saveWrongs(); savePapers(); saveSettings(); }catch(e){} }
+  try{
+    if(document.hidden){
+      if(state.quizView && state.quiz){
+        const s = currentSession();
+        if(s) qtAccrue(s, s.qids[state.quiz.pos], state.quiz.shownAt, Date.now());  // 结算隐藏前这段
+        state.quiz.pausedAt = Date.now();
+      }
+      saveSessions(); saveWrongs(); savePapers(); saveSettings();
+    } else {
+      if(state.quizView && state.quiz && state.quiz.pausedAt){
+        // 后台时长不计入：把停留起点后移同样的时长
+        state.quiz.shownAt += Date.now() - state.quiz.pausedAt;
+        delete state.quiz.pausedAt;
+        saveSessions();
+      }
+    }
+  }catch(e){}
 });
 window.addEventListener('beforeunload', () => { try{ saveSessions(); saveWrongs(); }catch(e){} });
 window.addEventListener('pagehide', () => { try{ saveSessions(); saveWrongs(); }catch(e){} });
